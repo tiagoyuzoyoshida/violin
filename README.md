@@ -6,7 +6,15 @@
 
 `violin` is a lightweight, keyboard-driven Spotify terminal client for Linux. Built in Rust for Spotify Premium users, it ships as a single static binary with standalone headless audio playback—no official desktop or mobile Spotify client required.
 
-<!-- Demo video / GIF placeholder: add link or media here -->
+![violin demo](assets/demo.gif)
+
+## Footprint
+
+Measured on Linux `x86_64` while streaming audio:
+
+- **~70 MB live RAM** (`~13 MB` `violin` TUI + `~58 MB` Spotify headless `soloist` engine) vs **~400–700 MB** for the official Chromium-based desktop client.
+- **~48 MB on disk** (`13 MB` static binary + `35 MB` `soloist`) vs **~370 MB** for the official desktop client.
+- **Zero Chromium / GPU processes** and instant (<50 ms) startup. `violin` trades album art and GUI chrome for low resource usage and pure keyboard speed.
 
 ## Features
 
