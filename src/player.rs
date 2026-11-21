@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::io::ErrorKind;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -29,6 +30,7 @@ const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(60);
 const WS_PORT_POLL_TIMEOUT: Duration = Duration::from_secs(15);
 const WS_PORT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const AUTH_READY_TIMEOUT: Duration = Duration::from_secs(15);
+const PENDING_PLAY_SYNC_GRACE: Duration = Duration::from_secs(5);
 
 const SOLOIST_BIN_NAME: &str = "soloist";
 const SOLOIST_DATA_DIR_NAME: &str = "data";
@@ -322,12 +324,12 @@ pub async fn ensure_soloist_ready(soloist_dir: &Path) -> Result<PathBuf, PlayerE
 
     let api_key_marker = soloist_dir.join(API_KEY_MARKER_NAME);
     if !api_key_marker.exists() {
-        setup_api_key(&binary_path, &data_dir, &api_key_marker).await?;
+        setup_api_key(soloist_dir, &binary_path, &data_dir, &api_key_marker).await?;
     }
 
     let paired_marker = soloist_dir.join(PAIRED_MARKER_NAME);
     if !paired_marker.exists() {
-        pair_device(&binary_path, &data_dir, &paired_marker).await?;
+        pair_device(soloist_dir, &binary_path, &data_dir, &paired_marker).await?;
     }
 
     Ok(binary_path)
@@ -346,6 +348,95 @@ pub fn clear_soloist_pairing(soloist_dir: &Path) -> Result<(), PlayerError> {
     }
 }
 
+fn bundled_loader_name(arch: &str) -> Option<(&'static str, &'static str)> {
+    match arch {
+        "x86_64" => Some((
+            "ld-linux-x86-64.so.2",
+            "/usr/lib/x86_64-linux-gnu:/lib/x86_64-linux-gnu:/usr/lib64:/usr/lib",
+        )),
+        "aarch64" => Some((
+            "ld-linux-aarch64.so.1",
+            "/usr/lib/aarch64-linux-gnu:/lib/aarch64-linux-gnu:/usr/lib64:/usr/lib",
+        )),
+        _ => None,
+    }
+}
+
+/// Returns the bundled `glibc` dynamic linker path and prefix arguments when `<soloist_dir>/lib/<loader>` exists.
+pub fn bundled_loader_invocation(
+    soloist_dir: &Path,
+    binary_path: &Path,
+    arch: &str,
+) -> Option<(PathBuf, Vec<OsString>)> {
+    let (loader_name, sys_dirs) = bundled_loader_name(arch)?;
+    let lib_dir = soloist_dir.join("lib");
+    let loader_path = lib_dir.join(loader_name);
+    if !loader_path.exists() {
+        return None;
+    }
+
+    let mut library_path = OsString::from(lib_dir.as_os_str());
+    library_path.push(":");
+    library_path.push(sys_dirs);
+
+    Some((
+        loader_path,
+        vec![
+            OsString::from("--library-path"),
+            library_path,
+            binary_path.as_os_str().to_os_string(),
+        ],
+    ))
+}
+
+fn build_soloist_process(soloist_dir: &Path, binary_path: &Path) -> ProcessCommand {
+    let native_ok = std::process::Command::new(binary_path)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success());
+    if native_ok {
+        return ProcessCommand::new(binary_path);
+    }
+
+    if let Some((loader, prefix_args)) =
+        bundled_loader_invocation(soloist_dir, binary_path, std::env::consts::ARCH)
+    {
+        let mut cmd = ProcessCommand::new(loader);
+        cmd.args(prefix_args);
+        return cmd;
+    }
+
+    ProcessCommand::new(binary_path)
+}
+
+/// Returns `true` when a `TrackSynced` URI is a stale pre-play state within the 5s grace window after `PlayTrack`.
+pub fn should_suppress_stale_sync(
+    pending: &Option<(String, Instant)>,
+    now: Instant,
+    synced_track_uri: &str,
+) -> bool {
+    let Some((expected, since)) = pending else {
+        return false;
+    };
+    now.saturating_duration_since(*since) < PENDING_PLAY_SYNC_GRACE && synced_track_uri != expected
+}
+
+fn playback_state_item_uri(raw: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(raw).ok()?;
+    if value.get("type")?.as_str()? != "playback_state" {
+        return None;
+    }
+    value
+        .get("item")
+        .or_else(|| value.get("track"))?
+        .get("uri")?
+        .as_str()
+        .map(str::to_owned)
+}
+
 /// Runs the background Soloist playback worker until `cmd_rx` closes.
 pub async fn run_player_worker(
     soloist_dir: PathBuf,
@@ -354,6 +445,7 @@ pub async fn run_player_worker(
 ) {
     let mut active: Option<ActiveSoloist> = None;
     let mut active_track_uri: Option<String> = None;
+    let mut pending_play_uri: Option<(String, Instant)> = None;
 
     loop {
         tokio::select! {
@@ -384,12 +476,15 @@ pub async fn run_player_worker(
                                     }
                                 }
                             }
-                            active_track_uri = Some(format!("spotify:track:{}", track.id.as_str()));
+                            let track_uri = format!("spotify:track:{}", track.id.as_str());
+                            active_track_uri = Some(track_uri.clone());
+                            pending_play_uri = Some((track_uri, Instant::now()));
                             if let Some(ap) = active.as_mut()
                                 && let Err(err) = ap.ws.send(Message::Text(json.into())).await
                             {
                                 active = None;
                                 active_track_uri = None;
+                                pending_play_uri = None;
                                 if event_tx
                                     .send(AppEvent::PlaybackFailed(format!(
                                         "Spotify Soloist WebSocket send failed: {err}"
@@ -406,6 +501,7 @@ pub async fn run_player_worker(
                             {
                                 active = None;
                                 active_track_uri = None;
+                                pending_play_uri = None;
                                 if event_tx
                                     .send(AppEvent::PlaybackFailed(format!(
                                         "Spotify Soloist WebSocket send failed: {err}"
@@ -418,6 +514,7 @@ pub async fn run_player_worker(
                             }
                             if matches!(cmd, Command::StopPlayback) {
                                 active_track_uri = None;
+                                pending_play_uri = None;
                             }
                         }
                     }
@@ -426,14 +523,29 @@ pub async fn run_player_worker(
             msg = next_ws_message(&mut active), if active.is_some() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
+                        if let Some((ref expected, _)) = pending_play_uri
+                            && playback_state_item_uri(text.as_str()).as_deref()
+                                == Some(expected.as_str())
+                        {
+                            pending_play_uri = None;
+                        }
                         if let Some(ev) = parse_soloist_event(text.as_str(), active_track_uri.as_deref()) {
                             match &ev {
                                 AppEvent::TrackEnded => {
                                     active_track_uri = None;
                                 }
                                 AppEvent::TrackSynced { track, .. } => {
-                                    active_track_uri =
-                                        Some(format!("spotify:track:{}", track.id.as_str()));
+                                    let synced_uri =
+                                        format!("spotify:track:{}", track.id.as_str());
+                                    if should_suppress_stale_sync(
+                                        &pending_play_uri,
+                                        Instant::now(),
+                                        &synced_uri,
+                                    ) {
+                                        continue;
+                                    }
+                                    pending_play_uri = None;
+                                    active_track_uri = Some(synced_uri);
                                 }
                                 _ => {}
                             }
@@ -482,7 +594,7 @@ async fn start_soloist(soloist_dir: &Path) -> Result<ActiveSoloist, PlayerError>
         }
     }
 
-    let mut child = ProcessCommand::new(&binary_path)
+    let mut child = build_soloist_process(soloist_dir, &binary_path)
         .args(["-n", SOLOIST_DEVICE_NAME, "-D"])
         .arg(&data_dir)
         .args(["-w", "127.0.0.1:0", "-i", "80"])
@@ -702,6 +814,7 @@ fn unpack_soloist_binary(
 }
 
 async fn setup_api_key(
+    soloist_dir: &Path,
     binary_path: &Path,
     data_dir: &Path,
     marker_path: &Path,
@@ -725,7 +838,7 @@ async fn setup_api_key(
         ));
     }
 
-    let mut child = ProcessCommand::new(binary_path)
+    let mut child = build_soloist_process(soloist_dir, binary_path)
         .args(["setup-api-key", "--data-dir"])
         .arg(data_dir)
         .stdin(Stdio::piped())
@@ -771,6 +884,7 @@ async fn setup_api_key(
 }
 
 async fn pair_device(
+    soloist_dir: &Path,
     binary_path: &Path,
     data_dir: &Path,
     marker_path: &Path,
@@ -782,7 +896,7 @@ async fn pair_device(
          (After this one tap, violin plays standalone with no phone or Spotify app needed.)"
     );
 
-    let output = ProcessCommand::new(binary_path)
+    let output = build_soloist_process(soloist_dir, binary_path)
         .args(["-n", SOLOIST_DEVICE_NAME, "-D"])
         .arg(data_dir)
         .arg("--pair")
@@ -1245,5 +1359,88 @@ mod tests {
                 duration: Duration::ZERO,
             }]))
         );
+    }
+
+    #[test]
+    fn bundled_loader_invocation_returns_none_when_absent_and_builds_args_for_x86_64_and_aarch64() {
+        let soloist_dir = missing_dir_path("bundled-loader");
+        let binary_path = soloist_dir.join(SOLOIST_BIN_NAME);
+        create_dir_all(&soloist_dir).unwrap();
+
+        assert_eq!(
+            bundled_loader_invocation(&soloist_dir, &binary_path, "x86_64"),
+            None
+        );
+
+        let lib_dir = soloist_dir.join("lib");
+        create_dir_all(&lib_dir).unwrap();
+        let x86_loader = lib_dir.join("ld-linux-x86-64.so.2");
+        write_private_marker(&x86_loader).unwrap();
+
+        let (loader, args) =
+            bundled_loader_invocation(&soloist_dir, &binary_path, "x86_64").unwrap();
+        assert_eq!(loader, x86_loader);
+        assert_eq!(
+            args,
+            vec![
+                OsString::from("--library-path"),
+                OsString::from(format!(
+                    "{}:/usr/lib/x86_64-linux-gnu:/lib/x86_64-linux-gnu:/usr/lib64:/usr/lib",
+                    lib_dir.display()
+                )),
+                binary_path.as_os_str().to_os_string(),
+            ]
+        );
+
+        let arm_loader = lib_dir.join("ld-linux-aarch64.so.1");
+        write_private_marker(&arm_loader).unwrap();
+        let (loader, args) =
+            bundled_loader_invocation(&soloist_dir, &binary_path, "aarch64").unwrap();
+        assert_eq!(loader, arm_loader);
+        assert_eq!(
+            args,
+            vec![
+                OsString::from("--library-path"),
+                OsString::from(format!(
+                    "{}:/usr/lib/aarch64-linux-gnu:/lib/aarch64-linux-gnu:/usr/lib64:/usr/lib",
+                    lib_dir.display()
+                )),
+                binary_path.as_os_str().to_os_string(),
+            ]
+        );
+
+        assert_eq!(
+            bundled_loader_invocation(&soloist_dir, &binary_path, "riscv64"),
+            None
+        );
+
+        fs::remove_dir_all(&soloist_dir).unwrap();
+    }
+
+    #[test]
+    fn should_suppress_stale_sync_respects_grace_window_and_matching_uri() {
+        let now = Instant::now();
+        let pending = Some(("spotify:track:expected".to_string(), now));
+
+        assert!(should_suppress_stale_sync(
+            &pending,
+            now + Duration::from_secs(1),
+            "spotify:track:stale"
+        ));
+        assert!(!should_suppress_stale_sync(
+            &pending,
+            now + Duration::from_secs(1),
+            "spotify:track:expected"
+        ));
+        assert!(!should_suppress_stale_sync(
+            &pending,
+            now + Duration::from_secs(5),
+            "spotify:track:stale"
+        ));
+        assert!(!should_suppress_stale_sync(
+            &None,
+            now + Duration::from_secs(1),
+            "spotify:track:stale"
+        ));
     }
 }

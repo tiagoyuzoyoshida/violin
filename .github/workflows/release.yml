@@ -35,8 +35,8 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install musl-tools
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Install musl-tools and libatomic1
+        run: sudo apt-get update && sudo apt-get install -y musl-tools libatomic1
 
       - name: Build static binary
         env:
@@ -52,10 +52,26 @@ jobs:
 
       - name: Package release archive
         run: |
-          mkdir -p dist/stage
+          mkdir -p dist/stage/lib
           cp "target/${{ matrix.target }}/release/violin" dist/stage/violin
           cp LICENSE README.md dist/stage/
-          tar -C dist/stage -czf "dist/violin-${{ steps.tag.outputs.tag }}-${{ matrix.target }}.tar.gz" violin LICENSE README.md
+          if [ "${{ matrix.target }}" = "x86_64-unknown-linux-musl" ]; then
+            LIBDIR="/lib/x86_64-linux-gnu"
+            LOADER="/lib64/ld-linux-x86-64.so.2"
+          else
+            LIBDIR="/lib/aarch64-linux-gnu"
+            LOADER="/lib/ld-linux-aarch64.so.1"
+          fi
+          cp -L "$LOADER" "dist/stage/lib/$(basename "$LOADER")"
+          chmod 0755 "dist/stage/lib/$(basename "$LOADER")"
+          for lib in libc.so.6 libm.so.6 libatomic.so.1; do
+            if [ -e "${LIBDIR}/${lib}" ]; then
+              cp -L "${LIBDIR}/${lib}" "dist/stage/lib/${lib}"
+            elif [ -e "/usr${LIBDIR}/${lib}" ]; then
+              cp -L "/usr${LIBDIR}/${lib}" "dist/stage/lib/${lib}"
+            fi
+          done
+          tar -C dist/stage -czf "dist/violin-${{ steps.tag.outputs.tag }}-${{ matrix.target }}.tar.gz" violin LICENSE README.md lib
 
       - uses: actions/upload-artifact@v4
         with:

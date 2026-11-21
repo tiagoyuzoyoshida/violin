@@ -67,9 +67,25 @@ if command -v sha256sum >/dev/null 2>&1; then
   (cd "$TMP_DIR" && sha256sum -c --ignore-missing SHA256SUMS.txt)
 fi
 
-tar -xzf "${TMP_DIR}/${ARCHIVE}" -C "$TMP_DIR" violin
+tar -xzf "${TMP_DIR}/${ARCHIVE}" -C "$TMP_DIR"
 mkdir -p "$INSTALL_DIR"
 install -m 0755 "${TMP_DIR}/violin" "${INSTALL_DIR}/violin"
+
+SOLOIST_LIB_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/violin/soloist/lib"
+if [ -d "${TMP_DIR}/lib" ]; then
+  mkdir -p "$SOLOIST_LIB_DIR"
+  for f in "${TMP_DIR}/lib/"*; do
+    [ -e "$f" ] || continue
+    case "$(basename "$f")" in
+      ld-linux-*.so.*)
+        install -m 0755 "$f" "${SOLOIST_LIB_DIR}/$(basename "$f")"
+        ;;
+      *)
+        install -m 0644 "$f" "${SOLOIST_LIB_DIR}/$(basename "$f")"
+        ;;
+    esac
+  done
+fi
 
 echo "Installed violin ${TAG} to ${INSTALL_DIR}/violin"
 
