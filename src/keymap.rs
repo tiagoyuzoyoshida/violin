@@ -54,6 +54,8 @@ const DEFAULT_BINDINGS: &[(&str, Action, &[&str])] = &[
     ("play_pause", Action::TogglePlayPause, &["space"]),
     ("next_track", Action::NextTrack, &["l"]),
     ("previous_track", Action::PreviousTrack, &["h"]),
+    ("seek_backward", Action::SeekBackward, &["left"]),
+    ("seek_forward", Action::SeekForward, &["right"]),
     ("volume_up", Action::VolumeUp, &["+"]),
     ("volume_down", Action::VolumeDown, &["-"]),
     ("toggle_shuffle", Action::ToggleShuffle, &["z"]),
@@ -463,6 +465,14 @@ mod tests {
         assert_eq!(
             map_key(InputMode::Normal, press(KeyCode::Char('h'))),
             Some(Action::PreviousTrack)
+        );
+        assert_eq!(
+            map_key(InputMode::Normal, press(KeyCode::Left)),
+            Some(Action::SeekBackward)
+        );
+        assert_eq!(
+            map_key(InputMode::Normal, press(KeyCode::Right)),
+            Some(Action::SeekForward)
         );
         assert_eq!(
             map_key(

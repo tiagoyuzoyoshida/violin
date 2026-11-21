@@ -197,6 +197,7 @@ fn forward_commands(
             | Command::StopPlayback
             | Command::SkipNext
             | Command::SkipPrevious
+            | Command::Seek(_)
             | Command::SetShuffle(_)
             | Command::SetVolume(_) => {
                 let _ = player_cmd_tx.try_send(cmd);

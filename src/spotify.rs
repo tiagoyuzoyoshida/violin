@@ -916,7 +916,7 @@ pub fn build_collection_write_payload(
             {
                 "uri": format!("spotify:track:{track_id}"),
                 "added_at": timestamp_secs,
-                "removed": !liked
+                "is_removed": !liked
             }
         ]
     })
@@ -1655,11 +1655,11 @@ mod tests {
         assert_eq!(parsed["set"], "collection");
         assert_eq!(parsed["items"][0]["uri"], "spotify:track:trk1");
         assert_eq!(parsed["items"][0]["added_at"], 1_700_000_000);
-        assert_eq!(parsed["items"][0]["removed"], false);
+        assert_eq!(parsed["items"][0]["is_removed"], false);
 
         let unlike_json = build_collection_write_payload("yoshida", "trk1", false, 1_700_000_001);
         let parsed_unlike: serde_json::Value = serde_json::from_str(&unlike_json).unwrap();
-        assert_eq!(parsed_unlike["items"][0]["removed"], true);
+        assert_eq!(parsed_unlike["items"][0]["is_removed"], true);
 
         let create_changes = build_create_playlist_changes("Late Night Bach");
         let op = &create_changes.deltas[0].ops[0];

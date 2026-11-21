@@ -87,6 +87,7 @@ export VIOLIN_CLIENT_ID="your_spotify_client_id"
 | `Space` | Play / pause |
 | `l` | Next track (autoplay/radio queue, or album/playlist order) |
 | `h` | Previous track (autoplay/radio queue, or album/playlist order) |
+| `Left` / `Right` | Seek backward / forward by 5s |
 | `+` / `-` | Increase / decrease volume |
 | `z` | Toggle shuffle |
 | `f` | Like / unlike focused or playing track |
@@ -122,7 +123,7 @@ move_down = ["j", "down", "pagedown"]
 quit = ["q", "ctrl+q"]
 ```
 
-Configurable action names: `quit`, `search`, `toggle_view`, `previous_view`, `view_search`, `view_albums`, `view_queue`, `view_jam`, `toggle_search_section`, `move_down`, `move_up`, `select`, `play_selected`, `back`, `play_pause`, `next_track`, `previous_track`, `volume_up`, `volume_down`, `toggle_shuffle`, `toggle_like`, `add_to_playlist`, `create_playlist`, `refresh_jam`, `start_jam`, `join_jam`, `leave_jam`.
+Configurable action names: `quit`, `search`, `toggle_view`, `previous_view`, `view_search`, `view_albums`, `view_queue`, `view_jam`, `toggle_search_section`, `move_down`, `move_up`, `select`, `play_selected`, `back`, `play_pause`, `next_track`, `previous_track`, `seek_backward`, `seek_forward`, `volume_up`, `volume_down`, `toggle_shuffle`, `toggle_like`, `add_to_playlist`, `create_playlist`, `refresh_jam`, `start_jam`, `join_jam`, `leave_jam`.
 
 Invalid action names, unrecognized keys, empty binding lists, or duplicate key assignments fail startup with an explicit error.
 

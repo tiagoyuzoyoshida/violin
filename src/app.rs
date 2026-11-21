@@ -10,6 +10,8 @@ const PREVIOUS_TRACK_RESTART_THRESHOLD: Duration = Duration::from_secs(3);
 const POSITION_SYNC_DRIFT_THRESHOLD: Duration = Duration::from_millis(1500);
 const DEFAULT_VOLUME: u8 = 80;
 const VOLUME_STEP: u8 = 5;
+const SEEK_STEP: Duration = Duration::from_secs(5);
+const RADIO_REFILL_THRESHOLD: usize = 20;
 
 /// Top-level navigation views in the application.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,6 +76,8 @@ pub enum Action {
     TogglePlayPause,
     NextTrack,
     PreviousTrack,
+    SeekBackward,
+    SeekForward,
     VolumeUp,
     VolumeDown,
     ToggleShuffle,
@@ -156,6 +160,7 @@ pub enum Command {
     StopPlayback,
     SkipNext,
     SkipPrevious,
+    Seek(Duration),
     SetShuffle(bool),
     SetVolume(u8),
     SetTrackLiked {
@@ -196,6 +201,8 @@ pub struct AppState {
     pub selected_queue_track: usize,
     pub queue: PlaybackQueue,
     pub now_playing: Option<NowPlaying>,
+    pub radio_mode: bool,
+    radio_fetch_in_flight: bool,
     pub shuffle: bool,
     pub volume: u8,
     pub liked_track_ids: HashSet<String>,
@@ -235,6 +242,8 @@ impl AppState {
             selected_queue_track: 0,
             queue: PlaybackQueue::default(),
             now_playing: None,
+            radio_mode: false,
+            radio_fetch_in_flight: false,
             shuffle: false,
             volume: DEFAULT_VOLUME,
             liked_track_ids: HashSet::new(),
@@ -346,6 +355,8 @@ impl AppState {
             Action::TogglePlayPause => self.handle_toggle_play_pause(),
             Action::NextTrack => self.handle_next_track(),
             Action::PreviousTrack => self.handle_previous_track(),
+            Action::SeekBackward => self.handle_seek(false),
+            Action::SeekForward => self.handle_seek(true),
             Action::VolumeUp => {
                 self.volume = self.volume.saturating_add(VOLUME_STEP).min(100);
                 vec![Command::SetVolume(self.volume)]
@@ -489,6 +500,8 @@ impl AppState {
                     self.album_detail = None;
                     self.active_view = View::Queue;
                     self.status_message = None;
+                    self.radio_mode = false;
+                    self.radio_fetch_in_flight = false;
                     let cmds = self.play_queue(tracks, 0);
                     self.sync_upcoming_from_queue();
                     return cmds;
@@ -538,6 +551,8 @@ impl AppState {
                     if had_local_queue {
                         self.upcoming_queue.clear();
                         self.selected_queue_track = 0;
+                        self.radio_mode = false;
+                        self.radio_fetch_in_flight = false;
                     }
                 }
                 self.now_playing = Some(NowPlaying {
@@ -551,7 +566,9 @@ impl AppState {
             AppEvent::TrackEnded => {
                 if let Some(track) = self.queue.next_track().cloned() {
                     self.sync_upcoming_from_queue();
-                    return self.start_playing_track(track);
+                    let mut cmds = self.start_playing_track(track);
+                    self.maybe_refill_radio_queue(&mut cmds);
+                    return cmds;
                 }
                 if let Some(np) = self.now_playing.as_mut() {
                     np.status = PlaybackStatus::Stopped;
@@ -569,15 +586,29 @@ impl AppState {
                 Vec::new()
             }
             AppEvent::RadioTracksLoaded(tracks) => {
-                if let Some(np) = &self.now_playing
-                    && self.queue.len() <= 1
-                {
-                    let mut full = Vec::with_capacity(1 + tracks.len());
-                    full.push(np.track.clone());
-                    full.extend(tracks);
-                    self.queue.set_tracks(full, 0);
-                    self.sync_upcoming_from_queue();
+                self.radio_fetch_in_flight = false;
+                if !self.radio_mode || tracks.is_empty() {
+                    return Vec::new();
                 }
+                let mut full = self.queue.tracks().to_vec();
+                if full.is_empty()
+                    && let Some(np) = &self.now_playing
+                {
+                    full.push(np.track.clone());
+                }
+                let mut seen: HashSet<String> =
+                    full.iter().map(|t| t.id.as_str().to_string()).collect();
+                for t in tracks {
+                    if seen.insert(t.id.as_str().to_string()) {
+                        full.push(t);
+                    }
+                }
+                let cur = self.queue.current_index().unwrap_or(0);
+                self.queue.set_tracks(full, cur);
+                let prev_selected = self.selected_queue_track;
+                self.sync_upcoming_from_queue();
+                let display_len = self.queue_display_tracks().len();
+                self.selected_queue_track = prev_selected.min(display_len.saturating_sub(1));
                 Vec::new()
             }
             AppEvent::ShuffleChanged(enabled) => {
@@ -916,6 +947,8 @@ impl AppState {
                 let start = detail.selected_track;
                 self.album_detail = None;
                 self.active_view = View::Queue;
+                self.radio_mode = false;
+                self.radio_fetch_in_flight = false;
                 let cmds = self.play_queue(tracks, start);
                 self.sync_upcoming_from_queue();
                 return cmds;
@@ -956,14 +989,16 @@ impl AppState {
                     let target_idx = cur + 1 + up_idx;
                     if self.queue.tracks().get(target_idx) == Some(&track) {
                         let tracks = self.queue.tracks().to_vec();
-                        let cmds = self.play_queue(tracks, target_idx);
+                        let mut cmds = self.play_queue(tracks, target_idx);
                         self.sync_upcoming_from_queue();
+                        self.maybe_refill_radio_queue(&mut cmds);
                         return cmds;
                     }
                 }
                 let remaining = self.upcoming_queue[up_idx..].to_vec();
-                let cmds = self.play_queue(remaining, 0);
+                let mut cmds = self.play_queue(remaining, 0);
                 self.sync_upcoming_from_queue();
+                self.maybe_refill_radio_queue(&mut cmds);
                 return cmds;
             }
             return Vec::new();
@@ -985,6 +1020,8 @@ impl AppState {
                     self.upcoming_queue.clear();
                     self.selected_queue_track = 0;
                     self.active_view = View::Queue;
+                    self.radio_mode = true;
+                    self.radio_fetch_in_flight = true;
                     let mut cmds = self.start_playing_track(track.clone());
                     cmds.push(Command::FetchTrackRadio(track));
                     return cmds;
@@ -1029,12 +1066,30 @@ impl AppState {
     fn handle_next_track(&mut self) -> Vec<Command> {
         if let Some(track) = self.queue.next_track().cloned() {
             self.sync_upcoming_from_queue();
-            return self.start_playing_track(track);
+            let mut cmds = self.start_playing_track(track);
+            self.maybe_refill_radio_queue(&mut cmds);
+            return cmds;
         }
         if self.now_playing.is_some() {
             return vec![Command::SkipNext];
         }
         Vec::new()
+    }
+
+    fn maybe_refill_radio_queue(&mut self, cmds: &mut Vec<Command>) {
+        if self.radio_mode
+            && !self.radio_fetch_in_flight
+            && self.upcoming_queue.len() < RADIO_REFILL_THRESHOLD
+            && let Some(seed) = self
+                .queue
+                .tracks()
+                .last()
+                .cloned()
+                .or_else(|| self.now_playing.as_ref().map(|np| np.track.clone()))
+        {
+            self.radio_fetch_in_flight = true;
+            cmds.push(Command::FetchTrackRadio(seed));
+        }
     }
 
     fn handle_previous_track(&mut self) -> Vec<Command> {
@@ -1053,6 +1108,18 @@ impl AppState {
             return vec![Command::SkipPrevious];
         }
         Vec::new()
+    }
+
+    fn handle_seek(&mut self, forward: bool) -> Vec<Command> {
+        let Some(np) = self.now_playing.as_mut() else {
+            return Vec::new();
+        };
+        np.position = if forward {
+            np.position.saturating_add(SEEK_STEP).min(np.track.duration)
+        } else {
+            np.position.saturating_sub(SEEK_STEP)
+        };
+        vec![Command::Seek(np.position)]
     }
 
     fn sync_upcoming_from_queue(&mut self) {
@@ -1616,14 +1683,19 @@ mod tests {
         state.handle_event(AppEvent::QueueUpdated(Vec::new()));
         assert_eq!(state.upcoming_queue, vec![r1.clone(), r2.clone()]);
 
-        // NextTrack / TrackEnded advance and update upcoming_queue live.
+        // NextTrack / TrackEnded advance and update upcoming_queue live,
+        // triggering a single background refill while below threshold.
         assert_eq!(
             state.handle_action(Action::NextTrack),
-            vec![Command::PlayTrack(r1.clone())]
+            vec![
+                Command::PlayTrack(r1.clone()),
+                Command::FetchTrackRadio(r2.clone()),
+            ]
         );
         assert_eq!(state.now_playing.as_ref().unwrap().track, r1);
         assert_eq!(state.upcoming_queue, vec![r2.clone()]);
 
+        // While refill is in flight, TrackEnded does not emit a duplicate FetchTrackRadio.
         assert_eq!(
             state.handle_event(AppEvent::TrackEnded),
             vec![Command::PlayTrack(r2.clone())]
@@ -1655,6 +1727,67 @@ mod tests {
         let late_radio = make_track("r1", "Late Radio", 100);
         state.handle_event(AppEvent::RadioTracksLoaded(vec![late_radio]));
         assert_eq!(state.upcoming_queue, vec![t2]);
+        assert!(!state.radio_mode);
+    }
+
+    #[test]
+    fn radio_refill_appends_deduplicated_tracks_and_preserves_index_and_selection() {
+        let mut state = AppState::new();
+        let seed = make_track("seed", "Seed Track", 120);
+        let r1 = make_track("r1", "Radio One", 130);
+        let r2 = make_track("r2", "Radio Two", 140);
+        let r3 = make_track("r3", "Radio Three", 150);
+
+        state.handle_event(AppEvent::SearchCompleted {
+            query: "seed".to_string(),
+            results: SearchResults {
+                tracks: vec![seed.clone()],
+                albums: vec![],
+            },
+        });
+        state.handle_action(Action::Select);
+        state.handle_event(AppEvent::RadioTracksLoaded(vec![r1.clone(), r2.clone()]));
+
+        // Advance to r1 -> emits FetchTrackRadio(r2).
+        let cmds = state.handle_action(Action::NextTrack);
+        assert_eq!(
+            cmds,
+            vec![
+                Command::PlayTrack(r1.clone()),
+                Command::FetchTrackRadio(r2.clone()),
+            ]
+        );
+        // Move cursor to row 1 in Queue before refill arrives.
+        state.selected_queue_track = 1;
+
+        // Refill includes duplicates (seed, r1, r2) plus new track r3.
+        state.handle_event(AppEvent::RadioTracksLoaded(vec![
+            seed,
+            r1.clone(),
+            r2.clone(),
+            r3.clone(),
+        ]));
+        assert_eq!(state.now_playing.as_ref().unwrap().track, r1);
+        assert_eq!(state.queue.current_index(), Some(1));
+        assert_eq!(state.upcoming_queue, vec![r2.clone(), r3.clone()]);
+        assert_eq!(state.selected_queue_track, 1);
+
+        // Selecting r2 in Queue advances and triggers another refill seeded by r3.
+        let queue_cmds = state.handle_action(Action::Select);
+        assert_eq!(
+            queue_cmds,
+            vec![
+                Command::PlayTrack(r2.clone()),
+                Command::FetchTrackRadio(r3.clone()),
+            ]
+        );
+
+        // Failed radio fetch (empty vec) resets in-flight flag so TrackEnded can retry.
+        state.handle_event(AppEvent::RadioTracksLoaded(Vec::new()));
+        assert_eq!(
+            state.handle_event(AppEvent::TrackEnded),
+            vec![Command::PlayTrack(r3.clone()), Command::FetchTrackRadio(r3)]
+        );
     }
 
     #[test]
@@ -2374,5 +2507,56 @@ mod tests {
             state.handle_action(Action::NextTrack),
             vec![Command::SkipNext]
         );
+    }
+
+    #[test]
+    fn seek_actions_update_position_clamp_bounds_and_ignore_when_idle() {
+        let mut state = AppState::new();
+        assert!(state.handle_action(Action::SeekForward).is_empty());
+        assert!(state.handle_action(Action::SeekBackward).is_empty());
+
+        let track = make_track("t1", "Track One", 12);
+        state.handle_event(AppEvent::TrackSynced {
+            track,
+            position: Duration::from_secs(4),
+            status: PlaybackStatus::Playing,
+        });
+
+        assert_eq!(
+            state.handle_action(Action::SeekForward),
+            vec![Command::Seek(Duration::from_secs(9))]
+        );
+        assert_eq!(
+            state.now_playing.as_ref().unwrap().position,
+            Duration::from_secs(9)
+        );
+
+        assert_eq!(
+            state.handle_action(Action::SeekForward),
+            vec![Command::Seek(Duration::from_secs(12))]
+        );
+        assert_eq!(
+            state.now_playing.as_ref().unwrap().position,
+            Duration::from_secs(12)
+        );
+
+        assert_eq!(
+            state.handle_action(Action::SeekBackward),
+            vec![Command::Seek(Duration::from_secs(7))]
+        );
+        assert_eq!(
+            state.now_playing.as_ref().unwrap().position,
+            Duration::from_secs(7)
+        );
+
+        assert_eq!(
+            state.handle_action(Action::SeekBackward),
+            vec![Command::Seek(Duration::from_secs(2))]
+        );
+        assert_eq!(
+            state.handle_action(Action::SeekBackward),
+            vec![Command::Seek(Duration::ZERO)]
+        );
+        assert_eq!(state.now_playing.as_ref().unwrap().position, Duration::ZERO);
     }
 }

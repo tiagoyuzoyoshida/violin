@@ -56,9 +56,9 @@ pub async fn run_spotify_worker(
             Command::FetchTrackRadio(track) => match ensure_session(&auth, &mut session).await {
                 Ok(sess) => match client.track_radio(&sess, &track).await {
                     Ok(tracks) => AppEvent::RadioTracksLoaded(tracks),
-                    Err(_) => continue,
+                    Err(_) => AppEvent::RadioTracksLoaded(Vec::new()),
                 },
-                Err(_) => continue,
+                Err(_) => AppEvent::RadioTracksLoaded(Vec::new()),
             },
             Command::SetTrackLiked { track, liked } => {
                 match ensure_session(&auth, &mut session).await {
@@ -149,6 +149,7 @@ pub async fn run_spotify_worker(
             | Command::StopPlayback
             | Command::SkipNext
             | Command::SkipPrevious
+            | Command::Seek(_)
             | Command::SetShuffle(_)
             | Command::SetVolume(_) => continue,
         };
