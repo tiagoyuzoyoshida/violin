@@ -1,0 +1,10 @@
+pub mod app;
+pub mod auth;
+pub mod config;
+pub mod domain;
+pub mod keymap;
+pub mod player;
+pub mod spotify;
+pub mod terminal;
+pub mod ui;
+pub mod worker;

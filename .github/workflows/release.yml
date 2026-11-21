@@ -1,0 +1,87 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v0.1.0); defaults to github.ref_name"
+        required: false
+        type: string
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-24.04
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve release tag
+        id: tag
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install musl-tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build static binary
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          CC_aarch64_unknown_linux_musl: musl-gcc
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Strip binary
+        run: |
+          if command -v strip >/dev/null 2>&1; then
+            strip "target/${{ matrix.target }}/release/violin"
+          fi
+
+      - name: Package release archive
+        run: |
+          mkdir -p dist/stage
+          cp "target/${{ matrix.target }}/release/violin" dist/stage/violin
+          cp LICENSE README.md dist/stage/
+          tar -C dist/stage -czf "dist/violin-${{ steps.tag.outputs.tag }}-${{ matrix.target }}.tar.gz" violin LICENSE README.md
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: violin-${{ matrix.target }}
+          path: dist/violin-*.tar.gz
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: dist
+
+      - name: Generate SHA256SUMS.txt
+        run: |
+          cd dist
+          sha256sum violin-*.tar.gz > SHA256SUMS.txt
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          generate_release_notes: true
+          files: |
+            dist/violin-*.tar.gz
+            dist/SHA256SUMS.txt
