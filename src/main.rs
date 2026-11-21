@@ -185,6 +185,8 @@ fn forward_commands(
             | Command::SetTrackLiked { .. }
             | Command::CreatePlaylist(_)
             | Command::AddTrackToPlaylist { .. }
+            | Command::RemovePlaylist { .. }
+            | Command::RemoveTrackFromPlaylist { .. }
             | Command::FetchJamSession
             | Command::CreateJamSession
             | Command::JoinJamSession(_)

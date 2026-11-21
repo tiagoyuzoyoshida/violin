@@ -195,17 +195,13 @@ mod tests {
         let raw = r#"
             [keybindings]
             search = "ctrl+f"
-            move_down = ["j", "pagedown", "down"]
+            move_down = ["j", "pagedown"]
         "#;
         let parsed = parse_keybindings_toml(raw).unwrap();
         assert_eq!(parsed.get("search"), Some(&vec!["ctrl+f".to_string()]));
         assert_eq!(
             parsed.get("move_down"),
-            Some(&vec![
-                "j".to_string(),
-                "pagedown".to_string(),
-                "down".to_string()
-            ])
+            Some(&vec!["j".to_string(), "pagedown".to_string()])
         );
 
         let keymap = Keymap::from_overrides(&parsed).unwrap();

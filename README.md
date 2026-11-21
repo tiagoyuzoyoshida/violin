@@ -90,17 +90,18 @@ export VIOLIN_CLIENT_ID="your_spotify_client_id"
 | `j` | Move selection down |
 | `k` | Move selection up |
 | `Enter` | Play selected track or open selected album / playlist / folder |
-| `Ctrl-Enter` | Immediately play selected album or playlist |
+| `Shift-Enter` | Immediately play selected album or playlist |
 | `Esc` | Close detail view or leave current library folder |
 | `Space` | Play / pause |
 | `l` | Next track (autoplay/radio queue, or album/playlist order) |
 | `h` | Previous track (autoplay/radio queue, or album/playlist order) |
 | `Left` / `Right` | Seek backward / forward by 5s |
-| `+` / `-` | Increase / decrease volume |
+| `Up` / `Down` | Increase / decrease volume |
 | `z` | Toggle shuffle |
 | `f` | Like / unlike focused or playing track |
 | `c` | Create a new playlist |
 | `a` | Add focused or playing track to a playlist |
+| `d` | Remove selected playlist or playlist track (with confirmation) |
 | `r` | Refresh active Jam session (`[4] Jam` tab) |
 | `n` | Start a new Jam session (auto-copies invite link; `[4] Jam` tab) |
 | `i` | Join a Jam session by link or token (`[4] Jam` tab) |
@@ -113,7 +114,7 @@ export VIOLIN_CLIENT_ID="your_spotify_client_id"
 
 | Key | Action |
 |---|---|
-| `Enter` | Submit search, create playlist, add to selected playlist, or join Jam |
+| `Enter` | Submit search, create playlist, add to selected playlist, join Jam, or confirm delete |
 | `Esc` | Cancel input / modal and return to Normal mode |
 | `j` / `k` / `Up` / `Down` | Move selection in the Add-to-Playlist picker |
 | `Backspace` | Delete last character |
@@ -127,13 +128,17 @@ Override any Normal-mode action under `[keybindings]` in `~/.config/violin/confi
 # ~/.config/violin/config.toml
 [keybindings]
 search = "ctrl+f"
-move_down = ["j", "down", "pagedown"]
+move_down = ["j", "pagedown"]
 quit = ["q", "ctrl+q"]
 ```
 
-Configurable action names: `quit`, `search`, `toggle_view`, `previous_view`, `view_search`, `view_albums`, `view_queue`, `view_jam`, `toggle_search_section`, `move_down`, `move_up`, `select`, `play_selected`, `back`, `play_pause`, `next_track`, `previous_track`, `seek_backward`, `seek_forward`, `volume_up`, `volume_down`, `toggle_shuffle`, `toggle_like`, `add_to_playlist`, `create_playlist`, `refresh_jam`, `start_jam`, `join_jam`, `leave_jam`.
+Configurable action names: `quit`, `search`, `toggle_view`, `previous_view`, `view_search`, `view_albums`, `view_queue`, `view_jam`, `toggle_search_section`, `move_down`, `move_up`, `select`, `play_selected`, `back`, `play_pause`, `next_track`, `previous_track`, `seek_backward`, `seek_forward`, `volume_up`, `volume_down`, `toggle_shuffle`, `toggle_like`, `add_to_playlist`, `create_playlist`, `remove`, `refresh_jam`, `start_jam`, `join_jam`, `leave_jam`.
 
 Invalid action names, unrecognized keys, empty binding lists, or duplicate key assignments fail startup with an explicit error.
+
+## Contributing
+
+Contributions, bug reports, and pull requests are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for architecture notes, development setup, and the PR checklist.
 
 ## Disclaimer
 

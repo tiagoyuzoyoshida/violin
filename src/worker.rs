@@ -106,6 +106,39 @@ pub async fn run_spotify_worker(
                 },
                 Err(msg) => AppEvent::Error(msg),
             },
+            Command::RemovePlaylist {
+                playlist_id,
+                playlist_name,
+            } => match ensure_session(&auth, &mut session).await {
+                Ok(sess) => match client.remove_playlist(&sess, &playlist_id).await {
+                    Ok(()) => AppEvent::PlaylistRemoved {
+                        playlist_id,
+                        playlist_name,
+                    },
+                    Err(err) => AppEvent::Error(err.to_string()),
+                },
+                Err(msg) => AppEvent::Error(msg),
+            },
+            Command::RemoveTrackFromPlaylist {
+                playlist_id,
+                playlist_name,
+                track_id,
+                track_title,
+            } => match ensure_session(&auth, &mut session).await {
+                Ok(sess) => match client
+                    .remove_track_from_playlist(&sess, &playlist_id, &track_id)
+                    .await
+                {
+                    Ok(()) => AppEvent::TrackRemovedFromPlaylist {
+                        playlist_id,
+                        playlist_name,
+                        track_id,
+                        track_title,
+                    },
+                    Err(err) => AppEvent::Error(err.to_string()),
+                },
+                Err(msg) => AppEvent::Error(msg),
+            },
             Command::FetchJamSession => match ensure_session(&auth, &mut session).await {
                 Ok(sess) => match client.current_jam(&sess).await {
                     Ok(jam) => AppEvent::JamSessionLoaded(jam),

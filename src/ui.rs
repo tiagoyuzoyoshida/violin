@@ -7,12 +7,12 @@ use ratatui::{
     text::{Line, Span},
     widgets::{
         Block, BorderType, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table,
-        TableState, Tabs,
+        TableState, Tabs, Wrap,
     },
 };
 
 use crate::{
-    app::{AppState, InputMode, SearchSection, View},
+    app::{AppState, InputMode, PendingDelete, SearchSection, View},
     domain::{Album, LibraryItem, PlaybackStatus, Track},
 };
 
@@ -75,6 +75,7 @@ pub fn render(frame: &mut Frame, state: &AppState) {
             Color::Magenta,
         ),
         InputMode::AddToPlaylistPicker => render_playlist_picker_modal(frame, state),
+        InputMode::ConfirmDelete => render_confirm_delete_modal(frame, state),
         InputMode::Normal | InputMode::SearchInput => {}
     }
 }
@@ -130,6 +131,10 @@ fn render_header(frame: &mut Frame, area: Rect, state: &AppState) {
                 .fg(Color::Magenta)
                 .add_modifier(Modifier::BOLD),
         )),
+        InputMode::ConfirmDelete => Some((
+            " CONFIRM DELETE ",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        )),
     };
     if let Some((label, style)) = badge {
         block = block.title_top(Line::styled(label, style).right_aligned());
@@ -148,7 +153,7 @@ fn render_header(frame: &mut Frame, area: Rect, state: &AppState) {
 }
 
 fn render_body(frame: &mut Frame, area: Rect, state: &AppState) {
-    if let Some(detail) = &state.album_detail {
+    if let Some(detail) = state.active_album_detail() {
         render_album_detail(frame, area, detail, state);
     } else {
         match state.active_view {
@@ -421,7 +426,7 @@ fn render_track_table(
 
             let title_cell = if liked {
                 Cell::from(Line::from(vec![
-                    Span::styled("♥ ", Style::default().fg(Color::Green)),
+                    Span::styled("♥ ", Style::default().fg(Color::Red)),
                     Span::raw(track.title.as_str()),
                 ]))
             } else {
@@ -561,7 +566,7 @@ fn render_now_playing(frame: &mut Frame, area: Rect, state: &AppState) {
             };
             let mut spans = vec![Span::raw(format!("{symbol} "))];
             if state.liked_track_ids.contains(np.track.id.as_str()) {
-                spans.push(Span::styled("♥ ", Style::default().fg(Color::Green)));
+                spans.push(Span::styled("♥ ", Style::default().fg(Color::Red)));
             }
             spans.push(Span::raw(format!(
                 "{} — {}",
@@ -674,6 +679,32 @@ fn render_text_modal(
         let offset = value.chars().count().min(max_offset) as u16;
         frame.set_cursor_position(Position::new(popup.x + 1 + offset, popup.y + 1));
     }
+}
+
+fn render_confirm_delete_modal(frame: &mut Frame, state: &AppState) {
+    let Some(pending) = &state.pending_delete else {
+        return;
+    };
+    let message = match pending {
+        PendingDelete::Playlist { playlist_name, .. } => {
+            format!("Remove playlist \"{playlist_name}\"?")
+        }
+        PendingDelete::TrackFromPlaylist {
+            playlist_name,
+            track_title,
+            ..
+        } => format!("Remove \"{track_title}\" from \"{playlist_name}\"?"),
+    };
+
+    let popup = centered_rect(60, 5, frame.area());
+    frame.render_widget(Clear, popup);
+    let block = rounded_block(" Confirm Delete ").border_style(Style::default().fg(Color::Red));
+    frame.render_widget(
+        Paragraph::new(message)
+            .wrap(Wrap { trim: true })
+            .block(block),
+        popup,
+    );
 }
 
 fn render_playlist_picker_modal(frame: &mut Frame, state: &AppState) {
@@ -908,6 +939,7 @@ mod tests {
         assert!(my_albums_screen.contains("Live Concert — Martha Argerich"));
 
         state.album_detail = Some(AlbumDetail {
+            origin_view: View::MyAlbums,
             album,
             tracks: vec![track],
             selected_track: 0,
@@ -916,6 +948,11 @@ mod tests {
         assert!(!detail_screen.contains("[Esc: back]"));
         assert!(detail_screen.contains("Kreutzer Sonata"));
         assert!(detail_screen.contains("02:05"));
+
+        state.active_view = View::Queue;
+        let queue_screen = render_to_string(&state, 100, 24);
+        assert!(queue_screen.contains("Queue"));
+        assert!(!queue_screen.contains("Violin Sonatas"));
     }
 
     #[test]
@@ -1032,12 +1069,34 @@ mod tests {
             tracks: vec![track.clone()],
             albums: vec![],
         };
+        state.now_playing = Some(NowPlaying {
+            track: track.clone(),
+            status: PlaybackStatus::Playing,
+            position: Duration::from_secs(10),
+        });
         state.notice_message = Some("Created playlist \"Bach\"".to_string());
 
-        let search_screen = render_to_string(&state, 100, 24);
+        let buf = render_buffer(&state, 100, 24);
+        let search_screen = buffer_to_string(&buf);
         assert!(search_screen.contains("♥ Chaconne"));
         assert!(search_screen.contains("04:05"));
         assert!(search_screen.contains("Created playlist \"Bach\""));
+        let red_hearts: Vec<u16> = (0..buf.area.height)
+            .flat_map(|y| (0..buf.area.width).map(move |x| (x, y)))
+            .filter_map(|(x, y)| {
+                let cell = &buf[(x, y)];
+                (cell.symbol() == "♥" && cell.fg == Color::Red).then_some(y)
+            })
+            .collect();
+        assert!(
+            red_hearts.iter().any(|&y| y < 20),
+            "expected liked ♥ in track table with Color::Red"
+        );
+        assert!(
+            red_hearts.iter().any(|&y| y >= 20),
+            "expected liked ♥ in now playing bar with Color::Red"
+        );
+        state.now_playing = None;
 
         // Clean empty-artist playlist formatting.
         state.notice_message = None;
@@ -1128,6 +1187,26 @@ mod tests {
         assert!(jam_modal.contains("JOIN JAM"));
         assert!(jam_modal.contains("Join Jam"));
         assert!(jam_modal.contains("tok_99"));
+
+        state.input_mode = InputMode::ConfirmDelete;
+        state.pending_delete = Some(PendingDelete::Playlist {
+            playlist_id: "pl_1".to_string(),
+            playlist_name: "Night Mix".to_string(),
+        });
+        let confirm_playlist = render_to_string(&state, 100, 24);
+        assert!(confirm_playlist.contains("CONFIRM DELETE"));
+        assert!(confirm_playlist.contains("Confirm Delete"));
+        assert!(confirm_playlist.contains("Remove playlist \"Night Mix\"?"));
+
+        state.pending_delete = Some(PendingDelete::TrackFromPlaylist {
+            playlist_id: "pl_1".to_string(),
+            playlist_name: "Night Mix".to_string(),
+            track_id: "trk_1".to_string(),
+            track_title: "Chaconne".to_string(),
+        });
+        let confirm_track = render_to_string(&state, 100, 24);
+        assert!(confirm_track.contains("CONFIRM DELETE"));
+        assert!(confirm_track.contains("Remove \"Chaconne\" from \"Night Mix\"?"));
     }
 
     #[test]

@@ -8,7 +8,7 @@ use librespot_protocol::extension_kind::ExtensionKind;
 use librespot_protocol::metadata as proto_metadata;
 use librespot_protocol::playlist4_external::{
     Add, CreateListReply, Delta, Item, ListAttributes, ListAttributesPartialState, ListChanges, Op,
-    SelectedListContent, UpdateListAttributes, op::Kind as OpKind,
+    Rem, SelectedListContent, UpdateListAttributes, op::Kind as OpKind,
 };
 use librespot_protocol::social_connect_v2::Session as ProtoJamSession;
 use protobuf::{EnumOrUnknown, Message, MessageField};
@@ -272,6 +272,39 @@ impl SpotifyClient {
         track_id: &str,
     ) -> Result<(), SpotifyError> {
         let changes = build_add_item_changes(&format!("spotify:track:{track_id}"), false);
+        let endpoint = format!("/playlist/v2/playlist/{playlist_base62}/changes");
+        session
+            .spclient()
+            .request_with_protobuf(&http::Method::POST, &endpoint, None, &changes)
+            .await
+            .map_err(|err| SpotifyError::SpClient(err.to_string()))?;
+        Ok(())
+    }
+
+    /// Removes the playlist identified by `playlist_base62` from the user's rootlist.
+    pub async fn remove_playlist(
+        &self,
+        session: &Session,
+        playlist_base62: &str,
+    ) -> Result<(), SpotifyError> {
+        let changes = build_remove_item_changes(&format!("spotify:playlist:{playlist_base62}"));
+        let endpoint = format!("/playlist/v2/user/{}/rootlist/changes", session.username());
+        session
+            .spclient()
+            .request_with_protobuf(&http::Method::POST, &endpoint, None, &changes)
+            .await
+            .map_err(|err| SpotifyError::SpClient(err.to_string()))?;
+        Ok(())
+    }
+
+    /// Removes `track_id` from the playlist identified by `playlist_base62`.
+    pub async fn remove_track_from_playlist(
+        &self,
+        session: &Session,
+        playlist_base62: &str,
+        track_id: &str,
+    ) -> Result<(), SpotifyError> {
+        let changes = build_remove_item_changes(&format!("spotify:track:{track_id}"));
         let endpoint = format!("/playlist/v2/playlist/{playlist_base62}/changes");
         session
             .spclient()
@@ -962,6 +995,27 @@ pub fn build_add_item_changes(uri: &str, add_first: bool) -> ListChanges {
     let mut op = Op::new();
     op.set_kind(OpKind::ADD);
     op.add = MessageField::some(add);
+
+    let mut delta = Delta::new();
+    delta.ops = vec![op];
+
+    let mut changes = ListChanges::new();
+    changes.deltas = vec![delta];
+    changes
+}
+
+/// Builds a `playlist4_external::ListChanges` protobuf to remove `uri`.
+pub fn build_remove_item_changes(uri: &str) -> ListChanges {
+    let mut item = Item::new();
+    item.set_uri(uri.to_string());
+
+    let mut rem = Rem::new();
+    rem.items = vec![item];
+    rem.set_items_as_key(true);
+
+    let mut op = Op::new();
+    op.set_kind(OpKind::REM);
+    op.rem = MessageField::some(rem);
 
     let mut delta = Delta::new();
     delta.ops = vec![op];
@@ -1689,6 +1743,13 @@ mod tests {
         let mut bad_reply = CreateListReply::new();
         bad_reply.set_uri("spotify:album:not_a_playlist".to_string());
         assert!(parse_create_list_reply(&bad_reply.write_to_bytes().unwrap()).is_err());
+
+        let rem_changes = build_remove_item_changes("spotify:track:trk9");
+        let rem_op = &rem_changes.deltas[0].ops[0];
+        assert_eq!(rem_op.kind(), OpKind::REM);
+        assert!(rem_op.rem.items_as_key());
+        assert_eq!(rem_op.rem.items.len(), 1);
+        assert_eq!(rem_op.rem.items[0].uri(), "spotify:track:trk9");
     }
 
     #[test]

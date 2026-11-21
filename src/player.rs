@@ -146,6 +146,8 @@ pub fn build_soloist_command_json(cmd: &Command) -> Option<String> {
         | Command::SetTrackLiked { .. }
         | Command::CreatePlaylist(_)
         | Command::AddTrackToPlaylist { .. }
+        | Command::RemovePlaylist { .. }
+        | Command::RemoveTrackFromPlaylist { .. }
         | Command::FetchJamSession
         | Command::CreateJamSession
         | Command::JoinJamSession(_)

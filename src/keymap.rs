@@ -49,19 +49,20 @@ const DEFAULT_BINDINGS: &[(&str, Action, &[&str])] = &[
     ("move_down", Action::MoveDown, &["j"]),
     ("move_up", Action::MoveUp, &["k"]),
     ("select", Action::Select, &["enter"]),
-    ("play_selected", Action::PlaySelected, &["ctrl+enter"]),
+    ("play_selected", Action::PlaySelected, &["shift+enter"]),
     ("back", Action::Back, &["esc"]),
     ("play_pause", Action::TogglePlayPause, &["space"]),
     ("next_track", Action::NextTrack, &["l"]),
     ("previous_track", Action::PreviousTrack, &["h"]),
     ("seek_backward", Action::SeekBackward, &["left"]),
     ("seek_forward", Action::SeekForward, &["right"]),
-    ("volume_up", Action::VolumeUp, &["+"]),
-    ("volume_down", Action::VolumeDown, &["-"]),
+    ("volume_up", Action::VolumeUp, &["up"]),
+    ("volume_down", Action::VolumeDown, &["down"]),
     ("toggle_shuffle", Action::ToggleShuffle, &["z"]),
     ("toggle_like", Action::ToggleLike, &["f"]),
     ("add_to_playlist", Action::OpenAddToPlaylist, &["a"]),
     ("create_playlist", Action::OpenCreatePlaylist, &["c"]),
+    ("remove", Action::RequestRemove, &["d"]),
     ("refresh_jam", Action::RefreshJam, &["r"]),
     ("start_jam", Action::StartJam, &["n"]),
     ("join_jam", Action::OpenJamJoin, &["i"]),
@@ -251,6 +252,7 @@ impl Keymap {
             InputMode::SearchInput => map_search_input(key),
             InputMode::CreatePlaylistInput | InputMode::JamJoinInput => map_modal_text_input(key),
             InputMode::AddToPlaylistPicker => map_modal_picker(key),
+            InputMode::ConfirmDelete => map_modal_confirm(key),
             InputMode::Normal => {
                 let mut modifiers = key.modifiers;
                 if matches!(key.code, KeyCode::Char(_) | KeyCode::BackTab) {
@@ -310,6 +312,14 @@ fn map_modal_picker(key: KeyEvent) -> Option<Action> {
         KeyCode::Enter => Some(Action::ModalSubmit),
         KeyCode::Char('j') | KeyCode::Down => Some(Action::ModalMoveDown),
         KeyCode::Char('k') | KeyCode::Up => Some(Action::ModalMoveUp),
+        _ => None,
+    }
+}
+
+fn map_modal_confirm(key: KeyEvent) -> Option<Action> {
+    match key.code {
+        KeyCode::Esc => Some(Action::ModalCancel),
+        KeyCode::Enter => Some(Action::ModalSubmit),
         _ => None,
     }
 }
@@ -399,7 +409,7 @@ mod tests {
         assert_eq!(
             map_key(
                 InputMode::Normal,
-                press_with(KeyCode::Enter, KeyModifiers::CONTROL)
+                press_with(KeyCode::Enter, KeyModifiers::SHIFT)
             ),
             Some(Action::PlaySelected)
         );
@@ -439,12 +449,18 @@ mod tests {
             map_key(InputMode::Normal, press(KeyCode::Char('j'))),
             Some(Action::MoveDown)
         );
-        assert_eq!(map_key(InputMode::Normal, press(KeyCode::Down)), None);
+        assert_eq!(
+            map_key(InputMode::Normal, press(KeyCode::Down)),
+            Some(Action::VolumeDown)
+        );
         assert_eq!(
             map_key(InputMode::Normal, press(KeyCode::Char('k'))),
             Some(Action::MoveUp)
         );
-        assert_eq!(map_key(InputMode::Normal, press(KeyCode::Up)), None);
+        assert_eq!(
+            map_key(InputMode::Normal, press(KeyCode::Up)),
+            Some(Action::VolumeUp)
+        );
         assert_eq!(
             map_key(InputMode::Normal, press(KeyCode::Enter)),
             Some(Action::Select)
@@ -479,12 +495,9 @@ mod tests {
                 InputMode::Normal,
                 press_with(KeyCode::Char('+'), KeyModifiers::SHIFT)
             ),
-            Some(Action::VolumeUp)
+            None
         );
-        assert_eq!(
-            map_key(InputMode::Normal, press(KeyCode::Char('-'))),
-            Some(Action::VolumeDown)
-        );
+        assert_eq!(map_key(InputMode::Normal, press(KeyCode::Char('-'))), None);
         assert_eq!(map_key(InputMode::Normal, press(KeyCode::Char('b'))), None);
         assert_eq!(map_key(InputMode::Normal, press(KeyCode::Char('p'))), None);
         assert_eq!(
@@ -735,6 +748,27 @@ mod tests {
         assert_eq!(
             map_key(InputMode::AddToPlaylistPicker, press(KeyCode::Esc)),
             Some(Action::ModalCancel)
+        );
+
+        assert_eq!(
+            map_key(InputMode::Normal, press(KeyCode::Char('d'))),
+            Some(Action::RequestRemove)
+        );
+        assert_eq!(
+            map_key(InputMode::ConfirmDelete, press(KeyCode::Enter)),
+            Some(Action::ModalSubmit)
+        );
+        assert_eq!(
+            map_key(InputMode::ConfirmDelete, press(KeyCode::Esc)),
+            Some(Action::ModalCancel)
+        );
+        assert_eq!(
+            map_key(InputMode::ConfirmDelete, press(KeyCode::Char('d'))),
+            None
+        );
+        assert_eq!(
+            map_key(InputMode::ConfirmDelete, press(KeyCode::Backspace)),
+            None
         );
     }
 }

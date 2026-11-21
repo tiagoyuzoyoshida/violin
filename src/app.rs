@@ -37,11 +37,28 @@ pub enum InputMode {
     CreatePlaylistInput,
     AddToPlaylistPicker,
     JamJoinInput,
+    ConfirmDelete,
+}
+
+/// Target awaiting confirmation in `InputMode::ConfirmDelete`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PendingDelete {
+    Playlist {
+        playlist_id: String,
+        playlist_name: String,
+    },
+    TrackFromPlaylist {
+        playlist_id: String,
+        playlist_name: String,
+        track_id: String,
+        track_title: String,
+    },
 }
 
 /// Track listing state for a drilled-down album.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlbumDetail {
+    pub origin_view: View,
     pub album: Album,
     pub tracks: Vec<Track>,
     pub selected_track: usize,
@@ -84,6 +101,7 @@ pub enum Action {
     ToggleLike,
     OpenCreatePlaylist,
     OpenAddToPlaylist,
+    RequestRemove,
     RefreshJam,
     StartJam,
     OpenJamJoin,
@@ -134,6 +152,16 @@ pub enum AppEvent {
         playlist_name: String,
         track_title: String,
     },
+    PlaylistRemoved {
+        playlist_id: String,
+        playlist_name: String,
+    },
+    TrackRemovedFromPlaylist {
+        playlist_id: String,
+        playlist_name: String,
+        track_id: String,
+        track_title: String,
+    },
     JamSessionLoaded(Option<JamSession>),
     JamSessionCreated {
         session: JamSession,
@@ -172,6 +200,16 @@ pub enum Command {
         playlist_id: String,
         playlist_name: String,
         track: Track,
+    },
+    RemovePlaylist {
+        playlist_id: String,
+        playlist_name: String,
+    },
+    RemoveTrackFromPlaylist {
+        playlist_id: String,
+        playlist_name: String,
+        track_id: String,
+        track_title: String,
     },
     FetchJamSession,
     CreateJamSession,
@@ -214,6 +252,7 @@ pub struct AppState {
     pub picker_folder_path: Vec<usize>,
     pub selected_playlist_picker: usize,
     pub jam_join_input: String,
+    pub pending_delete: Option<PendingDelete>,
 }
 
 impl Default for AppState {
@@ -255,6 +294,7 @@ impl AppState {
             picker_folder_path: Vec::new(),
             selected_playlist_picker: 0,
             jam_join_input: String::new(),
+            pending_delete: None,
         }
     }
 
@@ -270,7 +310,6 @@ impl AppState {
             Action::SwitchView(view) => {
                 self.active_view = view;
                 self.input_mode = InputMode::Normal;
-                self.album_detail = None;
                 Vec::new()
             }
             Action::ToggleView => {
@@ -281,7 +320,6 @@ impl AppState {
                     View::Jam => View::Search,
                 };
                 self.input_mode = InputMode::Normal;
-                self.album_detail = None;
                 Vec::new()
             }
             Action::PreviousView => {
@@ -292,7 +330,6 @@ impl AppState {
                     View::MyAlbums => View::Search,
                 };
                 self.input_mode = InputMode::Normal;
-                self.album_detail = None;
                 if self.active_view == View::Jam {
                     vec![Command::FetchJamSession]
                 } else {
@@ -300,7 +337,7 @@ impl AppState {
                 }
             }
             Action::ToggleSearchSection => {
-                if self.active_view == View::Search && self.album_detail.is_none() {
+                if self.active_view == View::Search && self.active_album_detail().is_none() {
                     self.search_section = match self.search_section {
                         SearchSection::Tracks => SearchSection::Albums,
                         SearchSection::Albums => SearchSection::Tracks,
@@ -343,7 +380,7 @@ impl AppState {
             Action::Select => self.handle_select(false),
             Action::PlaySelected => self.handle_select(true),
             Action::Back => {
-                if self.album_detail.is_some() {
+                if self.active_album_detail().is_some() {
                     self.album_detail = None;
                 } else if self.active_view == View::MyAlbums
                     && let Some(parent_idx) = self.library_folder_path.pop()
@@ -377,15 +414,16 @@ impl AppState {
                 Vec::new()
             }
             Action::OpenAddToPlaylist => self.handle_open_add_to_playlist(),
+            Action::RequestRemove => self.handle_request_remove(),
             Action::RefreshJam => {
-                if self.active_view != View::Jam || self.album_detail.is_some() {
+                if self.active_view != View::Jam || self.active_album_detail().is_some() {
                     return Vec::new();
                 }
                 self.clear_messages();
                 vec![Command::FetchJamSession]
             }
             Action::StartJam => {
-                if self.active_view != View::Jam || self.album_detail.is_some() {
+                if self.active_view != View::Jam || self.active_album_detail().is_some() {
                     return Vec::new();
                 }
                 self.input_mode = InputMode::Normal;
@@ -393,7 +431,7 @@ impl AppState {
                 vec![Command::CreateJamSession]
             }
             Action::OpenJamJoin => {
-                if self.active_view != View::Jam || self.album_detail.is_some() {
+                if self.active_view != View::Jam || self.active_album_detail().is_some() {
                     return Vec::new();
                 }
                 self.jam_join_input.clear();
@@ -402,7 +440,7 @@ impl AppState {
                 Vec::new()
             }
             Action::LeaveJam => {
-                if self.active_view != View::Jam || self.album_detail.is_some() {
+                if self.active_view != View::Jam || self.active_album_detail().is_some() {
                     return Vec::new();
                 }
                 self.clear_messages();
@@ -425,6 +463,7 @@ impl AppState {
                 self.input_mode = InputMode::Normal;
                 self.add_to_playlist_track = None;
                 self.picker_folder_path.clear();
+                self.pending_delete = None;
                 Vec::new()
             }
             Action::ModalSubmit => self.handle_modal_submit(),
@@ -507,6 +546,7 @@ impl AppState {
                     return cmds;
                 }
                 self.album_detail = Some(AlbumDetail {
+                    origin_view: self.active_view,
                     album,
                     tracks,
                     selected_track: 0,
@@ -650,6 +690,42 @@ impl AppState {
                     Some(format!("Added \"{track_title}\" to \"{playlist_name}\""));
                 Vec::new()
             }
+            AppEvent::PlaylistRemoved {
+                playlist_id,
+                playlist_name,
+            } => {
+                let full_id = format!("{PLAYLIST_ID_PREFIX}{playlist_id}");
+                remove_playlist_from_tree(&mut self.saved_albums, &full_id);
+                let max_idx = self.current_library_items().len().saturating_sub(1);
+                self.selected_saved_album = self.selected_saved_album.min(max_idx);
+                self.notice_message = Some(format!("Removed playlist \"{playlist_name}\""));
+                Vec::new()
+            }
+            AppEvent::TrackRemovedFromPlaylist {
+                playlist_id,
+                playlist_name,
+                track_id,
+                track_title,
+            } => {
+                let full_id = format!("{PLAYLIST_ID_PREFIX}{playlist_id}");
+                if let Some(detail) = &mut self.album_detail
+                    && detail.album.id.as_str() == full_id
+                {
+                    if let Some(pos) = detail
+                        .tracks
+                        .iter()
+                        .position(|track| track.id.as_str() == track_id)
+                    {
+                        detail.tracks.remove(pos);
+                    }
+                    let max_idx = detail.tracks.len().saturating_sub(1);
+                    detail.selected_track = detail.selected_track.min(max_idx);
+                }
+                self.notice_message = Some(format!(
+                    "Removed \"{track_title}\" from \"{playlist_name}\""
+                ));
+                Vec::new()
+            }
             AppEvent::JamSessionLoaded(session) => {
                 self.jam_session = session;
                 self.status_message = None;
@@ -721,9 +797,23 @@ impl AppState {
         }
     }
 
+    /// Returns the drilled-down album detail if it belongs to `active_view`.
+    pub fn active_album_detail(&self) -> Option<&AlbumDetail> {
+        self.album_detail
+            .as_ref()
+            .filter(|detail| detail.origin_view == self.active_view)
+    }
+
+    fn active_album_detail_mut(&mut self) -> Option<&mut AlbumDetail> {
+        let active = self.active_view;
+        self.album_detail
+            .as_mut()
+            .filter(|detail| detail.origin_view == active)
+    }
+
     /// Returns the currently focused track across views, falling back to `now_playing`.
     pub fn focused_track(&self) -> Option<Track> {
-        if let Some(detail) = &self.album_detail {
+        if let Some(detail) = self.active_album_detail() {
             return detail.tracks.get(detail.selected_track).cloned();
         }
         if self.active_view == View::Search && self.search_section == SearchSection::Tracks {
@@ -823,6 +913,44 @@ impl AppState {
         Vec::new()
     }
 
+    fn handle_request_remove(&mut self) -> Vec<Command> {
+        if let Some(detail) = self.active_album_detail() {
+            if let Some(playlist_id) = detail.album.id.as_str().strip_prefix(PLAYLIST_ID_PREFIX)
+                && let Some(track) = detail.tracks.get(detail.selected_track)
+            {
+                let playlist_id = playlist_id.to_string();
+                let playlist_name = detail.album.name.clone();
+                let track_id = track.id.as_str().to_string();
+                let track_title = track.title.clone();
+                self.clear_messages();
+                self.pending_delete = Some(PendingDelete::TrackFromPlaylist {
+                    playlist_id,
+                    playlist_name,
+                    track_id,
+                    track_title,
+                });
+                self.input_mode = InputMode::ConfirmDelete;
+            }
+            return Vec::new();
+        }
+
+        if self.active_view == View::MyAlbums
+            && let Some(LibraryItem::Collection(playlist)) =
+                self.current_library_items().get(self.selected_saved_album)
+            && let Some(playlist_id) = playlist.id.as_str().strip_prefix(PLAYLIST_ID_PREFIX)
+        {
+            let playlist_id = playlist_id.to_string();
+            let playlist_name = playlist.name.clone();
+            self.clear_messages();
+            self.pending_delete = Some(PendingDelete::Playlist {
+                playlist_id,
+                playlist_name,
+            });
+            self.input_mode = InputMode::ConfirmDelete;
+        }
+        Vec::new()
+    }
+
     fn handle_modal_submit(&mut self) -> Vec<Command> {
         self.clear_messages();
         let mode = self.input_mode;
@@ -877,6 +1005,30 @@ impl AppState {
                     }
                 }
             }
+            InputMode::ConfirmDelete => {
+                self.input_mode = InputMode::Normal;
+                match self.pending_delete.take() {
+                    Some(PendingDelete::Playlist {
+                        playlist_id,
+                        playlist_name,
+                    }) => vec![Command::RemovePlaylist {
+                        playlist_id,
+                        playlist_name,
+                    }],
+                    Some(PendingDelete::TrackFromPlaylist {
+                        playlist_id,
+                        playlist_name,
+                        track_id,
+                        track_title,
+                    }) => vec![Command::RemoveTrackFromPlaylist {
+                        playlist_id,
+                        playlist_name,
+                        track_id,
+                        track_title,
+                    }],
+                    None => Vec::new(),
+                }
+            }
             InputMode::Normal | InputMode::SearchInput => Vec::new(),
         }
     }
@@ -912,7 +1064,7 @@ impl AppState {
     fn move_selection(&mut self, delta: isize) {
         let library_len = self.current_library_items().len();
         let queue_len = self.queue_display_tracks().len();
-        let (index, len) = if let Some(detail) = self.album_detail.as_mut() {
+        let (index, len) = if let Some(detail) = self.active_album_detail_mut() {
             (&mut detail.selected_track, detail.tracks.len())
         } else if self.active_view == View::MyAlbums {
             (&mut self.selected_saved_album, library_len)
@@ -941,11 +1093,10 @@ impl AppState {
 
     fn handle_select(&mut self, auto_play: bool) -> Vec<Command> {
         self.clear_messages();
-        if let Some(detail) = &self.album_detail {
+        if let Some(detail) = self.active_album_detail() {
             if !detail.tracks.is_empty() {
                 let tracks = detail.tracks.clone();
                 let start = detail.selected_track;
-                self.album_detail = None;
                 self.active_view = View::Queue;
                 self.radio_mode = false;
                 self.radio_fetch_in_flight = false;
@@ -1147,6 +1298,18 @@ impl AppState {
     }
 }
 
+fn remove_playlist_from_tree(items: &mut Vec<LibraryItem>, full_album_id: &str) {
+    items.retain_mut(|item| match item {
+        LibraryItem::Collection(album) => album.id.as_str() != full_album_id,
+        LibraryItem::Folder {
+            items: children, ..
+        } => {
+            remove_playlist_from_tree(children, full_album_id);
+            true
+        }
+    });
+}
+
 fn filter_playlist_tree(items: &[LibraryItem]) -> Vec<LibraryItem> {
     items
         .iter()
@@ -1325,14 +1488,16 @@ mod tests {
             tracks: vec![t1.clone()],
             auto_play: false,
         });
-        assert!(state.album_detail.is_some());
+        assert!(state.active_album_detail().is_some());
         let cmds = state.handle_action(Action::Select);
         assert_eq!(cmds, vec![Command::PlayTrack(t1)]);
-        assert!(state.album_detail.is_none());
+        assert!(state.album_detail.is_some());
+        assert!(state.active_album_detail().is_none());
         assert_eq!(state.active_view, View::Queue);
 
         state.handle_action(Action::Back);
-        assert!(state.album_detail.is_none());
+        assert!(state.active_album_detail().is_none());
+        assert!(state.album_detail.is_some());
 
         state.handle_action(Action::SwitchView(View::MyAlbums));
         state.handle_event(AppEvent::SavedAlbumsLoaded {
@@ -1458,6 +1623,7 @@ mod tests {
         assert_eq!(state.active_view, View::Queue);
         assert_eq!(state.upcoming_queue.len(), 1);
         state.handle_action(Action::SwitchView(View::Search));
+        state.handle_action(Action::Back);
 
         let s1 = make_track("s1", "Search One", 100);
         let s2 = make_track("s2", "Search Two", 100);
@@ -2149,6 +2315,7 @@ mod tests {
 
         state.active_view = View::Jam;
         state.album_detail = Some(AlbumDetail {
+            origin_view: View::Jam,
             album: make_album("alb_1", "Album"),
             tracks: vec![],
             selected_track: 0,
@@ -2158,6 +2325,40 @@ mod tests {
         assert!(state.handle_action(Action::OpenJamJoin).is_empty());
         assert_eq!(state.input_mode, InputMode::Normal);
         assert!(state.handle_action(Action::LeaveJam).is_empty());
+    }
+
+    #[test]
+    fn album_detail_persists_on_origin_view_across_queue_switch() {
+        let mut state = AppState::new();
+        let album = make_album("a1", "Sonatas");
+        let t1 = make_track("t1", "Op. 24 No. 1", 180);
+        let t2 = make_track("t2", "Op. 24 No. 2", 210);
+
+        state.handle_event(AppEvent::AlbumTracksLoaded {
+            album,
+            tracks: vec![t1, t2.clone()],
+            auto_play: false,
+        });
+        assert_eq!(state.active_view, View::Search);
+        assert!(state.active_album_detail().is_some());
+
+        state.handle_action(Action::MoveDown);
+        let cmds = state.handle_action(Action::Select);
+        assert_eq!(cmds, vec![Command::PlayTrack(t2)]);
+        assert_eq!(state.active_view, View::Queue);
+        assert!(state.active_album_detail().is_none());
+        assert!(state.album_detail.is_some());
+
+        state.handle_action(Action::SwitchView(View::Search));
+        assert_eq!(state.active_view, View::Search);
+        assert_eq!(
+            state.active_album_detail().map(|d| d.selected_track),
+            Some(1)
+        );
+
+        state.handle_action(Action::Back);
+        assert!(state.album_detail.is_none());
+        assert!(state.active_album_detail().is_none());
     }
 
     #[test]
@@ -2558,5 +2759,129 @@ mod tests {
             vec![Command::Seek(Duration::ZERO)]
         );
         assert_eq!(state.now_playing.as_ref().unwrap().position, Duration::ZERO);
+    }
+
+    #[test]
+    fn remove_playlist_and_track_confirmation_flow_and_guards() {
+        let mut state = AppState::new();
+        let liked = make_album(LIKED_SONGS_ID, "Liked Songs");
+        let saved_album = make_album("alb_1", "Goldberg");
+        let root_playlist = make_album("playlist:pl_root", "Root Mix");
+        let nested_playlist = make_album("playlist:pl_nested", "Nested Mix");
+
+        state.handle_event(AppEvent::SavedAlbumsLoaded {
+            items: vec![
+                LibraryItem::Collection(liked),
+                LibraryItem::Collection(saved_album.clone()),
+                LibraryItem::Folder {
+                    name: "Classical".to_string(),
+                    items: vec![LibraryItem::Collection(nested_playlist.clone())],
+                },
+                LibraryItem::Collection(root_playlist),
+            ],
+            liked_track_ids: HashSet::new(),
+        });
+
+        // Ignored outside Library (Search, Queue, Jam).
+        assert!(state.handle_action(Action::RequestRemove).is_empty());
+        assert_eq!(state.input_mode, InputMode::Normal);
+        state.handle_action(Action::SwitchView(View::Queue));
+        assert!(state.handle_action(Action::RequestRemove).is_empty());
+        state.handle_action(Action::SwitchView(View::Jam));
+        assert!(state.handle_action(Action::RequestRemove).is_empty());
+
+        // In Library: ignored on Liked Songs (index 0), Saved Album (index 1), Folder (index 2).
+        state.handle_action(Action::SwitchView(View::MyAlbums));
+        assert!(state.handle_action(Action::RequestRemove).is_empty());
+        state.handle_action(Action::MoveDown);
+        assert!(state.handle_action(Action::RequestRemove).is_empty());
+        state.handle_action(Action::MoveDown);
+        assert!(state.handle_action(Action::RequestRemove).is_empty());
+
+        // Allowed on Root Mix (index 3) -> cancel clears pending_delete.
+        state.handle_action(Action::MoveDown);
+        assert!(state.handle_action(Action::RequestRemove).is_empty());
+        assert_eq!(state.input_mode, InputMode::ConfirmDelete);
+        assert_eq!(
+            state.pending_delete,
+            Some(PendingDelete::Playlist {
+                playlist_id: "pl_root".to_string(),
+                playlist_name: "Root Mix".to_string(),
+            })
+        );
+        state.handle_action(Action::ModalCancel);
+        assert_eq!(state.input_mode, InputMode::Normal);
+        assert_eq!(state.pending_delete, None);
+
+        // Enter nested folder and confirm removal of Nested Mix.
+        state.handle_action(Action::MoveUp); // index 2: Classical folder
+        state.handle_action(Action::Select);
+        assert!(state.handle_action(Action::RequestRemove).is_empty());
+        assert_eq!(state.input_mode, InputMode::ConfirmDelete);
+        let cmds = state.handle_action(Action::ModalSubmit);
+        assert_eq!(state.input_mode, InputMode::Normal);
+        assert_eq!(state.pending_delete, None);
+        assert_eq!(
+            cmds,
+            vec![Command::RemovePlaylist {
+                playlist_id: "pl_nested".to_string(),
+                playlist_name: "Nested Mix".to_string(),
+            }]
+        );
+        state.handle_event(AppEvent::PlaylistRemoved {
+            playlist_id: "pl_nested".to_string(),
+            playlist_name: "Nested Mix".to_string(),
+        });
+        assert!(state.current_library_items().is_empty());
+        assert_eq!(state.selected_saved_album, 0);
+        assert_eq!(
+            state.notice_message.as_deref(),
+            Some("Removed playlist \"Nested Mix\"")
+        );
+
+        // Ignored inside non-playlist album detail.
+        let t1 = make_track("t1", "Aria", 120);
+        let t2 = make_track("t2", "Var 1", 100);
+        state.handle_event(AppEvent::AlbumTracksLoaded {
+            album: saved_album,
+            tracks: vec![t1.clone(), t2.clone()],
+            auto_play: false,
+        });
+        assert!(state.handle_action(Action::RequestRemove).is_empty());
+        assert_eq!(state.input_mode, InputMode::Normal);
+
+        // Allowed inside playlist detail; confirm removes selected track and clamps index.
+        state.handle_event(AppEvent::AlbumTracksLoaded {
+            album: make_album("playlist:pl_root", "Root Mix"),
+            tracks: vec![t1, t2],
+            auto_play: false,
+        });
+        state.handle_action(Action::MoveDown);
+        assert!(state.handle_action(Action::RequestRemove).is_empty());
+        assert_eq!(state.input_mode, InputMode::ConfirmDelete);
+        let cmds = state.handle_action(Action::ModalSubmit);
+        assert_eq!(
+            cmds,
+            vec![Command::RemoveTrackFromPlaylist {
+                playlist_id: "pl_root".to_string(),
+                playlist_name: "Root Mix".to_string(),
+                track_id: "t2".to_string(),
+                track_title: "Var 1".to_string(),
+            }]
+        );
+        state.handle_event(AppEvent::TrackRemovedFromPlaylist {
+            playlist_id: "pl_root".to_string(),
+            playlist_name: "Root Mix".to_string(),
+            track_id: "t2".to_string(),
+            track_title: "Var 1".to_string(),
+        });
+        let detail = state.album_detail.as_ref().unwrap();
+        assert_eq!(detail.tracks.len(), 1);
+        assert_eq!(detail.tracks[0].id.as_str(), "t1");
+        assert_eq!(detail.selected_track, 0);
+        assert_eq!(
+            state.notice_message.as_deref(),
+            Some("Removed \"Var 1\" from \"Root Mix\"")
+        );
     }
 }
