@@ -16,6 +16,8 @@ use crate::{
     domain::{Album, LibraryItem, PlaybackStatus, Track},
 };
 
+const SELECTION_BG: Color = Color::Indexed(237);
+
 /// Formats a `Duration` as `MM:SS` (minutes may exceed two digits for long tracks).
 pub fn format_duration(duration: Duration) -> String {
     let total_secs = duration.as_secs();
@@ -395,7 +397,8 @@ fn render_track_table(
     let header_style = Style::default().fg(Color::DarkGray);
     let header = if show_album {
         Row::new(vec![
-            Cell::from("#"),
+            Cell::from(" #"),
+            Cell::from(""),
             Cell::from("Title"),
             Cell::from("Artist"),
             Cell::from("Album"),
@@ -403,7 +406,8 @@ fn render_track_table(
         ])
     } else {
         Row::new(vec![
-            Cell::from("#"),
+            Cell::from(" #"),
+            Cell::from(""),
             Cell::from("Title"),
             Cell::from("Artist"),
             Cell::from(Line::from("Time").right_aligned()),
@@ -419,33 +423,37 @@ fn render_track_table(
             let liked = state.liked_track_ids.contains(track.id.as_str());
 
             let index_cell = if is_active {
-                Cell::from("▶")
+                Cell::from(" ▶")
             } else {
                 Cell::from(format!("{:>2}", idx + 1)).style(Style::default().fg(Color::DarkGray))
             };
 
-            let title_cell = if liked {
-                Cell::from(Line::from(vec![
-                    Span::styled("♥ ", Style::default().fg(Color::Red)),
-                    Span::raw(track.title.as_str()),
-                ]))
-            } else {
-                Cell::from(track.title.as_str())
-            };
-
+            let title_cell = Cell::from(track.title.as_str());
             let artist_cell = Cell::from(track.artists_display());
+            let liked_cell = if liked {
+                Cell::from("♥").style(Style::default().fg(Color::Red))
+            } else {
+                Cell::from("")
+            };
             let time_cell = Cell::from(Line::from(format_duration(track.duration)).right_aligned());
 
             let row = if show_album {
                 Row::new(vec![
                     index_cell,
+                    liked_cell,
                     title_cell,
                     artist_cell,
                     Cell::from(track.album_name.as_str()),
                     time_cell,
                 ])
             } else {
-                Row::new(vec![index_cell, title_cell, artist_cell, time_cell])
+                Row::new(vec![
+                    index_cell,
+                    liked_cell,
+                    title_cell,
+                    artist_cell,
+                    time_cell,
+                ])
             };
 
             if is_active {
@@ -462,7 +470,8 @@ fn render_track_table(
 
     let widths: Vec<Constraint> = if show_album {
         vec![
-            Constraint::Length(4),
+            Constraint::Length(2),
+            Constraint::Length(1),
             Constraint::Percentage(40),
             Constraint::Percentage(30),
             Constraint::Percentage(30),
@@ -470,7 +479,8 @@ fn render_track_table(
         ]
     } else {
         vec![
-            Constraint::Length(4),
+            Constraint::Length(2),
+            Constraint::Length(1),
             Constraint::Percentage(55),
             Constraint::Percentage(45),
             Constraint::Length(6),
@@ -485,7 +495,7 @@ fn render_track_table(
     let table = Table::new(rows, widths)
         .header(header)
         .block(block)
-        .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+        .row_highlight_style(Style::default().bg(SELECTION_BG));
 
     frame.render_stateful_widget(table, area, &mut table_state);
 }
@@ -537,7 +547,7 @@ fn render_album_table(
     let table = Table::new(rows, widths)
         .header(header)
         .block(block)
-        .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+        .row_highlight_style(Style::default().bg(SELECTION_BG));
 
     frame.render_stateful_widget(table, area, &mut table_state);
 }
@@ -755,7 +765,7 @@ fn render_selectable_list(
     }
     let list = List::new(items)
         .block(block)
-        .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
+        .highlight_style(Style::default().bg(SELECTION_BG))
         .highlight_symbol("> ");
     frame.render_stateful_widget(list, area, &mut list_state);
 }
@@ -1064,9 +1074,10 @@ mod tests {
 
         let mut state = AppState::new();
         let track = make_track("trk_heart", "Chaconne", 245);
+        let unliked_track = make_track("trk_plain", "Sarabande", 180);
         state.liked_track_ids.insert("trk_heart".to_string());
         state.search_results = SearchResults {
-            tracks: vec![track.clone()],
+            tracks: vec![track.clone(), unliked_track],
             albums: vec![],
         };
         state.now_playing = Some(NowPlaying {
@@ -1078,22 +1089,53 @@ mod tests {
 
         let buf = render_buffer(&state, 100, 24);
         let search_screen = buffer_to_string(&buf);
-        assert!(search_screen.contains("♥ Chaconne"));
+        let table_lines: String = search_screen
+            .lines()
+            .take(20)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(table_lines.contains("Chaconne"));
+        assert!(table_lines.contains("Sarabande"));
         assert!(search_screen.contains("04:05"));
         assert!(search_screen.contains("Created playlist \"Bach\""));
-        let red_hearts: Vec<u16> = (0..buf.area.height)
+
+        let row_x_for = |needle: &str| -> u16 {
+            search_screen
+                .lines()
+                .find_map(|line| {
+                    line.find(needle)
+                        .map(|idx| line[..idx].chars().count() as u16)
+                })
+                .expect("expected track title in rendered buffer")
+        };
+        assert_eq!(
+            row_x_for("Chaconne"),
+            row_x_for("Sarabande"),
+            "liked and unliked track titles must align to the same x-column"
+        );
+
+        let red_hearts: Vec<(u16, u16)> = (0..buf.area.height)
             .flat_map(|y| (0..buf.area.width).map(move |x| (x, y)))
             .filter_map(|(x, y)| {
                 let cell = &buf[(x, y)];
-                (cell.symbol() == "♥" && cell.fg == Color::Red).then_some(y)
+                (cell.symbol() == "♥" && cell.fg == Color::Red).then_some((x, y))
             })
             .collect();
+        let table_heart = red_hearts
+            .iter()
+            .copied()
+            .find(|&(_, y)| y < 20)
+            .expect("expected liked ♥ in track table with Color::Red");
         assert!(
-            red_hearts.iter().any(|&y| y < 20),
-            "expected liked ♥ in track table with Color::Red"
+            table_heart.0 < row_x_for("Chaconne"),
+            "expected table ♥ in dedicated column to the left of title"
         );
+        let heart_cell = &buf[table_heart];
+        assert_eq!(heart_cell.fg, Color::Red);
+        assert_eq!(heart_cell.bg, SELECTION_BG);
+        assert!(!heart_cell.modifier.contains(Modifier::REVERSED));
         assert!(
-            red_hearts.iter().any(|&y| y >= 20),
+            red_hearts.iter().any(|&(_, y)| y >= 20),
             "expected liked ♥ in now playing bar with Color::Red"
         );
         state.now_playing = None;
