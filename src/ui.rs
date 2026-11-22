@@ -16,8 +16,6 @@ use crate::{
     domain::{Album, LibraryItem, PlaybackStatus, Track},
 };
 
-const SELECTION_BG: Color = Color::Indexed(237);
-
 /// Formats a `Duration` as `MM:SS` (minutes may exceed two digits for long tracks).
 pub fn format_duration(duration: Duration) -> String {
     let total_secs = duration.as_secs();
@@ -415,27 +413,65 @@ fn render_track_table(
     }
     .style(header_style);
 
+    let clamped_selected = (!tracks.is_empty()).then(|| selected.min(tracks.len() - 1));
     let rows: Vec<Row> = tracks
         .iter()
         .enumerate()
         .map(|(idx, track)| {
             let is_active = active_id == Some(track.id.as_str());
+            let is_selected = clamped_selected == Some(idx);
             let liked = state.liked_track_ids.contains(track.id.as_str());
 
-            let index_cell = if is_active {
-                Cell::from(" ▶")
-            } else {
-                Cell::from(format!("{:>2}", idx + 1)).style(Style::default().fg(Color::DarkGray))
-            };
-
-            let title_cell = Cell::from(track.title.as_str());
-            let artist_cell = Cell::from(track.artists_display());
-            let liked_cell = if liked {
-                Cell::from("♥").style(Style::default().fg(Color::Red))
-            } else {
-                Cell::from("")
-            };
-            let time_cell = Cell::from(Line::from(format_duration(track.duration)).right_aligned());
+            let (index_cell, liked_cell, title_cell, artist_cell, album_cell, time_cell) =
+                if is_selected {
+                    let text_style = if is_active {
+                        Style::default()
+                            .fg(Color::Black)
+                            .bg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::Black).bg(Color::Cyan)
+                    };
+                    let index_cell = if is_active {
+                        Cell::from(" ▶").style(text_style)
+                    } else {
+                        Cell::from(format!("{:>2}", idx + 1)).style(text_style)
+                    };
+                    let liked_cell = if liked {
+                        Cell::from("♥").style(Style::default().fg(Color::Red).bg(Color::Cyan))
+                    } else {
+                        Cell::from("").style(Style::default().bg(Color::Cyan))
+                    };
+                    (
+                        index_cell,
+                        liked_cell,
+                        Cell::from(track.title.as_str()).style(text_style),
+                        Cell::from(track.artists_display()).style(text_style),
+                        Cell::from(track.album_name.as_str()).style(text_style),
+                        Cell::from(Line::from(format_duration(track.duration)).right_aligned())
+                            .style(text_style),
+                    )
+                } else {
+                    let index_cell = if is_active {
+                        Cell::from(" ▶")
+                    } else {
+                        Cell::from(format!("{:>2}", idx + 1))
+                            .style(Style::default().fg(Color::DarkGray))
+                    };
+                    let liked_cell = if liked {
+                        Cell::from("♥").style(Style::default().fg(Color::Red))
+                    } else {
+                        Cell::from("")
+                    };
+                    (
+                        index_cell,
+                        liked_cell,
+                        Cell::from(track.title.as_str()),
+                        Cell::from(track.artists_display()),
+                        Cell::from(track.album_name.as_str()),
+                        Cell::from(Line::from(format_duration(track.duration)).right_aligned()),
+                    )
+                };
 
             let row = if show_album {
                 Row::new(vec![
@@ -443,7 +479,7 @@ fn render_track_table(
                     liked_cell,
                     title_cell,
                     artist_cell,
-                    Cell::from(track.album_name.as_str()),
+                    album_cell,
                     time_cell,
                 ])
             } else {
@@ -456,7 +492,7 @@ fn render_track_table(
                 ])
             };
 
-            if is_active {
+            if is_active && !is_selected {
                 row.style(
                     Style::default()
                         .fg(Color::Cyan)
@@ -488,14 +524,12 @@ fn render_track_table(
     };
 
     let mut table_state = TableState::default();
-    if !tracks.is_empty() {
-        table_state.select(Some(selected.min(tracks.len() - 1)));
-    }
+    table_state.select(clamped_selected);
 
     let table = Table::new(rows, widths)
         .header(header)
         .block(block)
-        .row_highlight_style(Style::default().bg(SELECTION_BG));
+        .row_highlight_style(Style::default().bg(Color::Cyan));
 
     frame.render_stateful_widget(table, area, &mut table_state);
 }
@@ -547,7 +581,7 @@ fn render_album_table(
     let table = Table::new(rows, widths)
         .header(header)
         .block(block)
-        .row_highlight_style(Style::default().bg(SELECTION_BG));
+        .row_highlight_style(Style::default().bg(Color::Cyan).fg(Color::Black));
 
     frame.render_stateful_widget(table, area, &mut table_state);
 }
@@ -765,7 +799,7 @@ fn render_selectable_list(
     }
     let list = List::new(items)
         .block(block)
-        .highlight_style(Style::default().bg(SELECTION_BG))
+        .highlight_style(Style::default().bg(Color::Cyan).fg(Color::Black))
         .highlight_symbol("> ");
     frame.render_stateful_widget(list, area, &mut list_state);
 }
@@ -918,17 +952,24 @@ mod tests {
         assert!(tracks_screen.contains("Sonatas"));
         assert!(tracks_screen.contains("02:05"));
 
-        // Active track row has ▶ marker and bold Color::Cyan foreground.
-        let mut found_active_cyan = false;
+        // Selected active track row has ▶ marker with Color::Black on Color::Cyan.
+        let mut found_active_selected = false;
         for y in 0..buf.area.height {
             for x in 0..buf.area.width {
                 let cell = &buf[(x, y)];
-                if cell.symbol() == "▶" && cell.fg == Color::Cyan && y < 20 {
-                    found_active_cyan = true;
+                if cell.symbol() == "▶"
+                    && cell.fg == Color::Black
+                    && cell.bg == Color::Cyan
+                    && y < 20
+                {
+                    found_active_selected = true;
                 }
             }
         }
-        assert!(found_active_cyan, "expected active track ▶ in Color::Cyan");
+        assert!(
+            found_active_selected,
+            "expected selected active track ▶ with Color::Black on Color::Cyan"
+        );
 
         state.search_section = SearchSection::Albums;
         let albums_screen = render_to_string(&state, 100, 24);
@@ -1132,8 +1173,11 @@ mod tests {
         );
         let heart_cell = &buf[table_heart];
         assert_eq!(heart_cell.fg, Color::Red);
-        assert_eq!(heart_cell.bg, SELECTION_BG);
+        assert_eq!(heart_cell.bg, Color::Cyan);
         assert!(!heart_cell.modifier.contains(Modifier::REVERSED));
+        let title_cell = &buf[(row_x_for("Chaconne"), table_heart.1)];
+        assert_eq!(title_cell.fg, Color::Black);
+        assert_eq!(title_cell.bg, Color::Cyan);
         assert!(
             red_hearts.iter().any(|&(_, y)| y >= 20),
             "expected liked ♥ in now playing bar with Color::Red"
