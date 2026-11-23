@@ -183,7 +183,6 @@ pub async fn run_spotify_worker(
             | Command::SkipNext
             | Command::SkipPrevious
             | Command::Seek(_)
-            | Command::SetShuffle(_)
             | Command::SetVolume(_) => continue,
         };
 

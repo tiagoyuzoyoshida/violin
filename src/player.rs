@@ -129,11 +129,6 @@ pub fn build_soloist_command_json(cmd: &Command) -> Option<String> {
             "command": "seek",
             "position_ms": position.as_millis() as u64,
         }),
-        Command::SetShuffle(enabled) => serde_json::json!({
-            "type": "command",
-            "command": "set_shuffle",
-            "enabled": enabled,
-        }),
         Command::SetVolume(volume) => serde_json::json!({
             "type": "command",
             "command": "set_volume",
@@ -1045,30 +1040,6 @@ mod tests {
             serde_json::json!({
                 "type": "command",
                 "command": "skip_prev"
-            })
-        );
-
-        let shuffle_on_json: serde_json::Value =
-            serde_json::from_str(&build_soloist_command_json(&Command::SetShuffle(true)).unwrap())
-                .unwrap();
-        assert_eq!(
-            shuffle_on_json,
-            serde_json::json!({
-                "type": "command",
-                "command": "set_shuffle",
-                "enabled": true
-            })
-        );
-
-        let shuffle_off_json: serde_json::Value =
-            serde_json::from_str(&build_soloist_command_json(&Command::SetShuffle(false)).unwrap())
-                .unwrap();
-        assert_eq!(
-            shuffle_off_json,
-            serde_json::json!({
-                "type": "command",
-                "command": "set_shuffle",
-                "enabled": false
             })
         );
 

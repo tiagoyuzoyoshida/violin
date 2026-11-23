@@ -12,7 +12,7 @@ use ratatui::{
 };
 
 use crate::{
-    app::{AppState, InputMode, PendingDelete, SearchSection, View},
+    app::{AppState, InputMode, PendingDelete, QueueContext, SearchSection, View},
     domain::{Album, LibraryItem, PlaybackStatus, Track},
 };
 
@@ -222,8 +222,11 @@ fn render_search_results(frame: &mut Frame, area: Rect, state: &AppState) {
                 frame,
                 area,
                 block,
-                &state.search_results.tracks,
-                state.selected_search_track,
+                TableRows {
+                    tracks: &state.search_results.tracks,
+                    selected: state.selected_search_track,
+                    dimmed_rows: 0,
+                },
                 true,
                 state,
             );
@@ -287,7 +290,11 @@ fn render_my_albums(frame: &mut Frame, area: Rect, state: &AppState) {
 }
 
 fn render_queue(frame: &mut Frame, area: Rect, state: &AppState) {
-    let block = rounded_block(" Up Next (Queue) ");
+    let title = match &state.queue_context {
+        QueueContext::Collection { label, .. } => format!(" Up Next · {label} "),
+        QueueContext::None | QueueContext::Radio => " Up Next (Queue) ".to_string(),
+    };
+    let block = rounded_block(title);
     let tracks = state.queue_display_tracks();
     if tracks.is_empty() {
         let empty = Paragraph::new("Queue is empty. Play a track to see upcoming songs.")
@@ -301,8 +308,11 @@ fn render_queue(frame: &mut Frame, area: Rect, state: &AppState) {
         frame,
         area,
         block,
-        &tracks,
-        state.selected_queue_track,
+        TableRows {
+            tracks: &tracks,
+            selected: state.selected_queue_track,
+            dimmed_rows: state.queue_history_len(),
+        },
         false,
         state,
     );
@@ -375,22 +385,36 @@ fn render_album_detail(
         frame,
         area,
         block,
-        &detail.tracks,
-        detail.selected_track,
+        TableRows {
+            tracks: &detail.tracks,
+            selected: detail.selected_track,
+            dimmed_rows: 0,
+        },
         false,
         state,
     );
+}
+
+/// Tracks to list, the highlighted row, and how many leading rows render dimmed (play history).
+struct TableRows<'a> {
+    tracks: &'a [Track],
+    selected: usize,
+    dimmed_rows: usize,
 }
 
 fn render_track_table(
     frame: &mut Frame,
     area: Rect,
     block: Block,
-    tracks: &[Track],
-    selected: usize,
+    rows: TableRows,
     show_album: bool,
     state: &AppState,
 ) {
+    let TableRows {
+        tracks,
+        selected,
+        dimmed_rows,
+    } = rows;
     let active_id = state.now_playing.as_ref().map(|np| np.track.id.as_str());
     let header_style = Style::default().fg(Color::DarkGray);
     let header = if show_album {
@@ -498,6 +522,8 @@ fn render_track_table(
                         .fg(Color::Cyan)
                         .add_modifier(Modifier::BOLD),
                 )
+            } else if idx < dimmed_rows && !is_selected {
+                row.style(Style::default().fg(Color::DarkGray))
             } else {
                 row
             }
@@ -587,7 +613,9 @@ fn render_album_table(
 }
 
 fn render_now_playing(frame: &mut Frame, area: Rect, state: &AppState) {
-    let title = if state.shuffle {
+    let shuffle_active =
+        state.shuffle && matches!(state.queue_context, QueueContext::Collection { .. });
+    let title = if shuffle_active {
         " Now Playing [SHUFFLE] "
     } else {
         " Now Playing "
@@ -1043,6 +1071,13 @@ mod tests {
         assert!(stopped_screen.contains("▶"));
 
         state.shuffle = true;
+        let radio_screen = render_to_string(&state, 100, 24);
+        assert!(!radio_screen.contains("[SHUFFLE]"));
+
+        state.queue_context = QueueContext::Collection {
+            label: "Album: Blue".to_string(),
+            tracks: Vec::new(),
+        };
         let shuffled_screen = render_to_string(&state, 100, 24);
         assert!(shuffled_screen.contains("Now Playing [SHUFFLE]"));
     }
@@ -1068,6 +1103,50 @@ mod tests {
         assert!(populated_screen.contains("Chaconne"));
         assert!(populated_screen.contains("Beethoven"));
         assert!(populated_screen.contains("04:05"));
+
+        state.queue_context = QueueContext::Collection {
+            label: "Album: Kind of Blue".to_string(),
+            tracks: Vec::new(),
+        };
+        let album_screen = render_to_string(&state, 100, 24);
+        assert!(album_screen.contains("Up Next · Album: Kind of Blue"));
+        assert!(!album_screen.contains("Up Next (Queue)"));
+    }
+
+    #[test]
+    fn queue_view_dims_history_rows_but_not_now_playing() {
+        let mut state = AppState::new();
+        state.active_view = View::Queue;
+        let played = make_track("h1", "Prelude", 100);
+        let current = make_track("t1", "Adagio", 200);
+        let next = make_track("q1", "Chaconne", 245);
+        state
+            .queue
+            .set_tracks(vec![played, current.clone(), next.clone()], 1);
+        state.now_playing = Some(NowPlaying {
+            track: current,
+            status: PlaybackStatus::Playing,
+            position: Duration::ZERO,
+        });
+        state.upcoming_queue = vec![next];
+        state.selected_queue_track = 2;
+
+        let buf = render_buffer(&state, 100, 24);
+
+        let title_fg = |title: &str| {
+            let (x, y) = (0..buf.area.height)
+                .flat_map(|y| (0..buf.area.width).map(move |x| (x, y)))
+                .find(|&(x, y)| {
+                    (0..title.len() as u16).all(|i| {
+                        x + i < buf.area.width
+                            && buf[(x + i, y)].symbol() == &title[i as usize..i as usize + 1]
+                    })
+                })
+                .unwrap_or_else(|| panic!("{title} not rendered"));
+            buf[(x, y)].fg
+        };
+        assert_eq!(title_fg("Prelude"), Color::DarkGray);
+        assert_ne!(title_fg("Adagio"), Color::DarkGray);
     }
 
     #[test]

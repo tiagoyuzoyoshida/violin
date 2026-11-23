@@ -90,14 +90,14 @@ export VIOLIN_CLIENT_ID="your_spotify_client_id"
 | `j` | Move selection down |
 | `k` | Move selection up |
 | `Enter` | Play selected track or open selected album / playlist / folder |
-| `Shift-Enter` | Immediately play selected album or playlist |
+| `Shift-Enter` / `p` | Play selected album / playlist from the start |
 | `Esc` | Close detail view or leave current library folder |
 | `Space` | Play / pause |
 | `l` | Next track (autoplay/radio queue, or album/playlist order) |
 | `h` | Previous track (autoplay/radio queue, or album/playlist order) |
 | `Left` / `Right` | Seek backward / forward by 5s |
 | `Up` / `Down` | Increase / decrease volume |
-| `z` | Toggle shuffle |
+| `z` | Toggle shuffle (album / playlist queues only) |
 | `f` | Like / unlike focused or playing track |
 | `c` | Create a new playlist |
 | `a` | Add focused or playing track to a playlist |

@@ -49,7 +49,7 @@ const DEFAULT_BINDINGS: &[(&str, Action, &[&str])] = &[
     ("move_down", Action::MoveDown, &["j"]),
     ("move_up", Action::MoveUp, &["k"]),
     ("select", Action::Select, &["enter"]),
-    ("play_selected", Action::PlaySelected, &["shift+enter"]),
+    ("play_selected", Action::PlaySelected, &["shift+enter", "p"]),
     ("back", Action::Back, &["esc"]),
     ("play_pause", Action::TogglePlayPause, &["space"]),
     ("next_track", Action::NextTrack, &["l"]),
@@ -414,6 +414,10 @@ mod tests {
             Some(Action::PlaySelected)
         );
         assert_eq!(
+            map_key(InputMode::Normal, press(KeyCode::Char('p'))),
+            Some(Action::PlaySelected)
+        );
+        assert_eq!(
             map_key(InputMode::Normal, press(KeyCode::Char('f'))),
             Some(Action::ToggleLike)
         );
@@ -499,7 +503,6 @@ mod tests {
         );
         assert_eq!(map_key(InputMode::Normal, press(KeyCode::Char('-'))), None);
         assert_eq!(map_key(InputMode::Normal, press(KeyCode::Char('b'))), None);
-        assert_eq!(map_key(InputMode::Normal, press(KeyCode::Char('p'))), None);
         assert_eq!(
             map_key(
                 InputMode::Normal,
