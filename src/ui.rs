@@ -225,7 +225,6 @@ fn render_search_results(frame: &mut Frame, area: Rect, state: &AppState) {
                 TableRows {
                     tracks: &state.search_results.tracks,
                     selected: state.selected_search_track,
-                    dimmed_rows: 0,
                 },
                 true,
                 state,
@@ -311,7 +310,6 @@ fn render_queue(frame: &mut Frame, area: Rect, state: &AppState) {
         TableRows {
             tracks: &tracks,
             selected: state.selected_queue_track,
-            dimmed_rows: state.queue_history_len(),
         },
         false,
         state,
@@ -388,18 +386,16 @@ fn render_album_detail(
         TableRows {
             tracks: &detail.tracks,
             selected: detail.selected_track,
-            dimmed_rows: 0,
         },
         false,
         state,
     );
 }
 
-/// Tracks to list, the highlighted row, and how many leading rows render dimmed (play history).
+/// Tracks to list and the highlighted row.
 struct TableRows<'a> {
     tracks: &'a [Track],
     selected: usize,
-    dimmed_rows: usize,
 }
 
 fn render_track_table(
@@ -410,11 +406,7 @@ fn render_track_table(
     show_album: bool,
     state: &AppState,
 ) {
-    let TableRows {
-        tracks,
-        selected,
-        dimmed_rows,
-    } = rows;
+    let TableRows { tracks, selected } = rows;
     let active_id = state.now_playing.as_ref().map(|np| np.track.id.as_str());
     let header_style = Style::default().fg(Color::DarkGray);
     let header = if show_album {
@@ -522,8 +514,6 @@ fn render_track_table(
                         .fg(Color::Cyan)
                         .add_modifier(Modifier::BOLD),
                 )
-            } else if idx < dimmed_rows && !is_selected {
-                row.style(Style::default().fg(Color::DarkGray))
             } else {
                 row
             }
@@ -854,7 +844,7 @@ fn format_album_line(album: &Album) -> String {
 mod tests {
     use super::*;
     use crate::{
-        app::{AlbumDetail, NowPlaying},
+        app::{AlbumDetail, AppEvent, NowPlaying},
         domain::{AlbumId, SearchResults, Track, TrackId},
     };
     use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
@@ -1114,39 +1104,40 @@ mod tests {
     }
 
     #[test]
-    fn queue_view_dims_history_rows_but_not_now_playing() {
+    fn queue_view_starts_with_now_playing_highlighted() {
         let mut state = AppState::new();
-        state.active_view = View::Queue;
-        let played = make_track("h1", "Prelude", 100);
-        let current = make_track("t1", "Adagio", 200);
-        let next = make_track("q1", "Chaconne", 245);
-        state
-            .queue
-            .set_tracks(vec![played, current.clone(), next.clone()], 1);
-        state.now_playing = Some(NowPlaying {
-            track: current,
-            status: PlaybackStatus::Playing,
-            position: Duration::ZERO,
+        let tracks: Vec<Track> = ["Prelude", "Allemande", "Courante", "Sarabande"]
+            .iter()
+            .enumerate()
+            .map(|(i, title)| make_track(&format!("t{i}"), title, 100))
+            .collect();
+        state.handle_event(AppEvent::AlbumTracksLoaded {
+            album: make_album("a1", "Suites", None),
+            tracks,
+            auto_play: true,
         });
-        state.upcoming_queue = vec![next];
-        state.selected_queue_track = 2;
+        state.handle_event(AppEvent::TrackEnded);
+        state.handle_event(AppEvent::TrackEnded);
 
         let buf = render_buffer(&state, 100, 24);
+        let screen = render_to_string(&state, 100, 24);
 
-        let title_fg = |title: &str| {
-            let (x, y) = (0..buf.area.height)
-                .flat_map(|y| (0..buf.area.width).map(move |x| (x, y)))
-                .find(|&(x, y)| {
-                    (0..title.len() as u16).all(|i| {
-                        x + i < buf.area.width
-                            && buf[(x + i, y)].symbol() == &title[i as usize..i as usize + 1]
-                    })
-                })
-                .unwrap_or_else(|| panic!("{title} not rendered"));
-            buf[(x, y)].fg
-        };
-        assert_eq!(title_fg("Prelude"), Color::DarkGray);
-        assert_ne!(title_fg("Adagio"), Color::DarkGray);
+        assert!(!screen.contains("Prelude"));
+        assert!(!screen.contains("Allemande"));
+        let first_row = (0..buf.area.height)
+            .find(|&y| {
+                let line: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
+                line.contains("Courante")
+            })
+            .expect("now-playing title not rendered");
+        let header_row = (0..buf.area.height)
+            .find(|&y| {
+                let line: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
+                line.contains("Title")
+            })
+            .expect("table header not rendered");
+        assert_eq!(first_row, header_row + 1);
+        assert_eq!(buf[(5, first_row)].bg, Color::Cyan);
     }
 
     #[test]

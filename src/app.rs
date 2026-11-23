@@ -13,8 +13,8 @@ const POSITION_SYNC_DRIFT_THRESHOLD: Duration = Duration::from_millis(1500);
 const DEFAULT_VOLUME: u8 = 80;
 const VOLUME_STEP: u8 = 5;
 const SEEK_STEP: Duration = Duration::from_secs(5);
-/// Upcoming tracks shown (and kept filled) outside a collection; matches `spotify::SEARCH_LIMIT`.
-const QUEUE_DISPLAY_LIMIT: usize = 20;
+/// Upcoming tracks shown (and kept filled) outside a collection: now playing + 19 = 20 rows, matching `spotify::SEARCH_LIMIT`.
+const QUEUE_UPCOMING_LIMIT: usize = 19;
 const QUEUE_HISTORY_LIMIT: usize = 100;
 
 /// Where the local playback queue came from; decides display length, shuffle, and sync handling.
@@ -629,7 +629,7 @@ impl AppState {
                     && self.queue_context == QueueContext::None
                     && self.queue.len() <= 1
                 {
-                    tracks.truncate(QUEUE_DISPLAY_LIMIT);
+                    tracks.truncate(QUEUE_UPCOMING_LIMIT);
                     self.upcoming_queue = tracks;
                     let display_len = self.queue_display_tracks().len();
                     self.selected_queue_track =
@@ -793,37 +793,21 @@ impl AppState {
         vec![Command::Search(query)]
     }
 
-    /// Returns the played history, the currently playing track (if any), then `upcoming_queue`
-    /// for `[3] Queue`.
+    /// Returns the currently playing track (if any), then `upcoming_queue` for `[3] Queue`.
+    /// Played history stays in `queue` for `PreviousTrack` but is not shown.
     pub fn queue_display_tracks(&self) -> Vec<Track> {
         let shown = match self.queue_context {
             QueueContext::Collection { .. } => self.upcoming_queue.len(),
             QueueContext::None | QueueContext::Radio => {
-                self.upcoming_queue.len().min(QUEUE_DISPLAY_LIMIT)
+                self.upcoming_queue.len().min(QUEUE_UPCOMING_LIMIT)
             }
         };
-        let upcoming = &self.upcoming_queue[..shown];
-        let history = &self.queue.tracks()[..self.queue_history_len()];
-        let mut tracks = Vec::with_capacity(history.len() + 1 + upcoming.len());
-        tracks.extend(history.iter().cloned());
+        let mut tracks = Vec::with_capacity(1 + shown);
         if let Some(np) = &self.now_playing {
             tracks.push(np.track.clone());
         }
-        tracks.extend(upcoming.iter().cloned());
+        tracks.extend(self.upcoming_queue[..shown].iter().cloned());
         tracks
-    }
-
-    /// Returns how many already-played tracks precede the now-playing row in `[3] Queue`.
-    /// Zero unless the now-playing track is the queue's current track.
-    pub fn queue_history_len(&self) -> usize {
-        let (Some(np), Some(cur)) = (&self.now_playing, self.queue.current_index()) else {
-            return 0;
-        };
-        if self.queue.tracks().get(cur) == Some(&np.track) {
-            cur
-        } else {
-            0
-        }
     }
 
     /// Returns the drilled-down album detail if it belongs to `active_view`.
@@ -1152,20 +1136,12 @@ impl AppState {
         }
 
         if self.active_view == View::Queue {
-            let history_len = self.queue_history_len();
             let selected = self.selected_queue_track;
-            if selected < history_len {
-                let tracks = self.queue.tracks().to_vec();
-                let mut cmds = self.play_queue(tracks, selected);
-                self.sync_upcoming_from_queue();
-                self.maybe_refill_radio_queue(&mut cmds);
-                return cmds;
-            }
             let up_idx = if let Some(np) = &self.now_playing {
-                if selected == history_len {
+                if selected == 0 {
                     return self.start_playing_track(np.track.clone());
                 }
-                selected - history_len - 1
+                selected - 1
             } else {
                 selected
             };
@@ -1348,7 +1324,7 @@ impl AppState {
     fn maybe_refill_radio_queue(&mut self, cmds: &mut Vec<Command>) {
         if self.queue_context == QueueContext::Radio
             && !self.radio_fetch_in_flight
-            && self.upcoming_queue.len() < QUEUE_DISPLAY_LIMIT
+            && self.upcoming_queue.len() < QUEUE_UPCOMING_LIMIT
             && let Some(seed) = self
                 .queue
                 .tracks()
@@ -1403,8 +1379,7 @@ impl AppState {
             Some(idx) => self.queue.tracks().get(idx + 1..).unwrap_or(&[]).to_vec(),
             None => Vec::new(),
         };
-        // Read from the queue, not `queue_history_len()`: callers sync before `now_playing` is updated.
-        self.selected_queue_track = self.queue.current_index().unwrap_or(0);
+        self.selected_queue_track = 0;
     }
 
     fn play_queue(&mut self, tracks: Vec<Track>, start_index: usize) -> Vec<Command> {
@@ -2027,8 +2002,8 @@ mod tests {
                 Command::FetchTrackRadio(r2.clone()),
             ]
         );
-        // Move cursor to row 2 (r2, after the seed history row and r1) before refill arrives.
-        state.selected_queue_track = 2;
+        // Move cursor to row 1 (r2, after the now-playing r1) before refill arrives.
+        state.selected_queue_track = 1;
 
         // Refill includes duplicates (seed, r1, r2) plus new track r3.
         state.handle_event(AppEvent::RadioTracksLoaded(vec![
@@ -2040,7 +2015,7 @@ mod tests {
         assert_eq!(state.now_playing.as_ref().unwrap().track, r1);
         assert_eq!(state.queue.current_index(), Some(1));
         assert_eq!(state.upcoming_queue, vec![r2.clone(), r3.clone()]);
-        assert_eq!(state.selected_queue_track, 2);
+        assert_eq!(state.selected_queue_track, 1);
 
         // Selecting r2 in Queue advances and triggers another refill seeded by r3.
         let queue_cmds = state.handle_action(Action::Select);
@@ -2620,13 +2595,13 @@ mod tests {
         state.handle_action(Action::MoveDown);
         assert_eq!(state.selected_queue_track, 2);
 
-        // Selecting row 2 plays t3; t1 and t2 become history and the cursor rests on t3.
+        // Selecting row 2 plays t3; t1 and t2 become hidden history and the cursor rests on row 0.
         let play_t3 = state.handle_action(Action::Select);
         assert_eq!(play_t3, vec![Command::PlayTrack(t3.clone())]);
         assert_eq!(state.now_playing.as_ref().unwrap().track, t3);
         assert!(state.upcoming_queue.is_empty());
-        assert_eq!(state.selected_queue_track, 2);
-        assert_eq!(state.queue_display_tracks(), vec![t1, t2, t3]);
+        assert_eq!(state.selected_queue_track, 0);
+        assert_eq!(state.queue_display_tracks(), vec![t3]);
     }
 
     #[test]
@@ -3200,7 +3175,7 @@ mod tests {
 
         let mut state = AppState::new();
         state.handle_event(AppEvent::QueueUpdated(soloist_queue.clone()));
-        assert_eq!(state.upcoming_queue.len(), QUEUE_DISPLAY_LIMIT);
+        assert_eq!(state.upcoming_queue.len(), QUEUE_UPCOMING_LIMIT);
 
         let mut state = AppState::new();
         play_radio(&mut state, &make_track("seed", "Seed", 100));
@@ -3214,64 +3189,20 @@ mod tests {
     }
 
     #[test]
-    fn queue_display_shows_played_history_before_now_playing() {
+    fn queue_hides_history_but_previous_track_returns_to_it() {
         let mut state = AppState::new();
-        let tracks = numbered_tracks(4);
-        play_collection(&mut state, make_album("a1", "Blue"), tracks.clone());
-        assert_eq!(state.queue_history_len(), 0);
-
-        state.handle_event(AppEvent::TrackEnded);
-        state.handle_event(AppEvent::TrackEnded);
-
-        assert_eq!(state.queue_history_len(), 2);
-        assert_eq!(state.queue_display_tracks(), tracks);
-        assert_eq!(state.selected_queue_track, 2);
-    }
-
-    #[test]
-    fn queue_history_is_empty_without_now_playing() {
-        let state = AppState::new();
-        assert_eq!(state.queue_history_len(), 0);
-        assert!(state.queue_display_tracks().is_empty());
-    }
-
-    #[test]
-    fn selecting_history_row_replays_it_and_keeps_later_tracks_upcoming() {
-        let mut state = AppState::new();
-        let tracks = numbered_tracks(4);
+        let tracks = numbered_tracks(5);
         play_collection(&mut state, make_album("a1", "Blue"), tracks.clone());
         state.handle_event(AppEvent::TrackEnded);
         state.handle_event(AppEvent::TrackEnded);
 
-        state.handle_action(Action::MoveUp);
-        state.handle_action(Action::MoveUp);
+        assert_eq!(state.queue_display_tracks(), tracks[2..].to_vec());
         assert_eq!(state.selected_queue_track, 0);
-        let cmds = state.handle_action(Action::Select);
 
-        assert_eq!(cmds, vec![Command::PlayTrack(tracks[0].clone())]);
-        assert_eq!(state.now_playing.as_ref().unwrap().track, tracks[0]);
-        assert_eq!(state.upcoming_queue, tracks[1..].to_vec());
-        assert_eq!(state.queue_history_len(), 0);
-        assert_eq!(state.queue_display_tracks(), tracks);
-    }
+        let cmds = state.handle_action(Action::PreviousTrack);
 
-    #[test]
-    fn toggle_like_on_history_row_targets_that_track() {
-        let mut state = AppState::new();
-        let tracks = numbered_tracks(3);
-        play_collection(&mut state, make_album("a1", "Blue"), tracks.clone());
-        state.handle_event(AppEvent::TrackEnded);
-        state.handle_action(Action::MoveUp);
-
-        let cmds = state.handle_action(Action::ToggleLike);
-
-        assert_eq!(
-            cmds,
-            vec![Command::SetTrackLiked {
-                track: tracks[0].clone(),
-                liked: true,
-            }]
-        );
+        assert_eq!(cmds, vec![Command::PlayTrack(tracks[1].clone())]);
+        assert_eq!(state.queue_display_tracks(), tracks[1..].to_vec());
     }
 
     #[test]
@@ -3294,13 +3225,13 @@ mod tests {
         });
         state.sync_upcoming_from_queue();
 
-        assert_eq!(state.queue_history_len(), QUEUE_HISTORY_LIMIT);
+        assert_eq!(state.queue.current_index(), Some(QUEUE_HISTORY_LIMIT));
         assert_eq!(state.queue.current(), Some(&full[120]));
         assert_eq!(state.queue.tracks()[0], full[20]);
     }
 
     #[test]
-    fn queue_display_caps_radio_at_twenty_upcoming_and_shows_full_collection() {
+    fn queue_display_caps_radio_at_twenty_rows_and_shows_full_collection() {
         let mut state = AppState::new();
         let seed = make_track("seed", "Seed", 100);
         play_radio(&mut state, &seed);
@@ -3309,7 +3240,7 @@ mod tests {
             .collect();
         state.handle_event(AppEvent::RadioTracksLoaded(radio));
         assert_eq!(state.upcoming_queue.len(), 30);
-        assert_eq!(state.queue_display_tracks().len(), 1 + QUEUE_DISPLAY_LIMIT);
+        assert_eq!(state.queue_display_tracks().len(), 20);
 
         play_collection(&mut state, make_album("a1", "Blue"), numbered_tracks(31));
         assert_eq!(state.queue_display_tracks().len(), 31);
@@ -3334,11 +3265,16 @@ mod tests {
         state.handle_action(Action::NextTrack);
         state.handle_action(Action::NextTrack);
         assert_eq!(state.upcoming_queue.len(), 20);
+        assert_eq!(
+            state.handle_action(Action::NextTrack),
+            vec![Command::PlayTrack(radio[5].clone())]
+        );
+        assert_eq!(state.upcoming_queue.len(), QUEUE_UPCOMING_LIMIT);
         let cmds = state.handle_action(Action::NextTrack);
         assert_eq!(
             cmds,
             vec![
-                Command::PlayTrack(radio[5].clone()),
+                Command::PlayTrack(radio[6].clone()),
                 Command::FetchTrackRadio(radio[24].clone())
             ]
         );
