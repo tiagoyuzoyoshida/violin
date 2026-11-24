@@ -26,16 +26,18 @@ cargo run
 
 `violin` uses a unidirectional, pure-core architecture so core behavior is fast and deterministic to test offline:
 
-- `src/domain.rs` — Typed domain models (`Track`, `Album`, `LibraryItem`, `PlaybackQueue`, `JamSession`). Pure data; zero I/O.
+- `src/domain.rs` — Typed domain models (`Track`, `Album`, `LibraryItem`, `PlaybackQueue`, `JamSession`, `CoverArt`). Pure data; zero I/O.
 - `src/app.rs` — Pure state machine (`AppState`, `Action`, `AppEvent`, `Command`). Reduces inputs and events into updated state and side-effect commands. Zero I/O.
 - `src/keymap.rs` — Translates terminal key events into `Action`, with user overrides from `config.toml`.
 - `src/ui.rs` — Pure `ratatui` rendering of `&AppState` (read-only; zero I/O).
+- `src/art.rs` — Cover-art decoding and Kitty / 2×2 quadrant-block renderers.
 - `src/auth.rs`, `src/spotify.rs`, `src/player.rs`, `src/worker.rs` — Async background workers for OAuth2 PKCE, Spotify desktop endpoints (`spclient`/Pathfinder), and headless Spotify `soloist` playback.
+- `src/update.rs` — Self-updater (`violin update`).
 - `src/main.rs` — Thin composition root and terminal event loop.
 
 ## Engineering standards
 
-- **Pure core, effects at the edges:** Never import `reqwest`, `tokio`, `crossterm`, `ratatui`, or `librespot` into `src/domain.rs` or `src/app.rs`.
+- **Pure core, effects at the edges:** Never import `reqwest`, `tokio`, `crossterm`, `ratatui`, `librespot`, or `image` into `src/domain.rs` or `src/app.rs`.
 - **All input flows through `Action`:** Never mutate `AppState` directly from raw key events. Map keys in `src/keymap.rs` into an `Action` so user-configured `[keybindings]` work everywhere.
 - **Non-blocking UI loop & clean terminal restore:** Network calls and audio control must run in background workers over bounded async channels, never inside the render/input loop. Terminal raw mode must always restore cleanly on exit or panic.
 - **Fail loudly & use strong types:** Validate inputs at module boundaries, use typed errors (`thiserror`) and enums/newtypes (`TrackId`, `AlbumId`), and never swallow errors with silent fallbacks.
@@ -57,6 +59,6 @@ bash -n install.sh
 ## Good places to help
 
 - Artist profile view (top tracks & albums)
+- Playlist sorting (e.g. most recently added, matching standard Spotify)
 - Packaging for Linux distributions (AUR, Nix, Homebrew Linux, `.deb`/`.rpm`)
-- Self-update subcommand (`violin update`)
 - Bug reports with reproduction steps and distro/terminal details

@@ -88,6 +88,14 @@ impl TerminalGuard {
         KITTY_IMAGE_ACTIVE.store(false, Ordering::SeqCst);
         Ok(())
     }
+
+    /// Clears a specific Kitty Graphics Protocol image ID from stdout.
+    pub fn clear_kitty_image_id(&mut self, image_id: u32) -> io::Result<()> {
+        let mut stdout = io::stdout();
+        stdout.write_all(crate::art::kitty_clear_image_id(image_id).as_bytes())?;
+        stdout.flush()?;
+        Ok(())
+    }
 }
 
 impl Drop for TerminalGuard {
@@ -109,7 +117,14 @@ fn install_panic_hook() {
 fn restore_terminal() {
     if KITTY_IMAGE_ACTIVE.swap(false, Ordering::SeqCst) {
         let mut stdout = io::stdout();
-        let _ = stdout.write_all(crate::art::kitty_clear_image().as_bytes());
+        let _ = stdout.write_all(
+            crate::art::kitty_clear_image_id(crate::art::KITTY_COVER_IMAGE_ID).as_bytes(),
+        );
+        let _ = stdout
+            .write_all(crate::art::kitty_clear_image_id(crate::art::KITTY_BAR_IMAGE_ID).as_bytes());
+        let _ = stdout.write_all(
+            crate::art::kitty_clear_image_id(crate::art::KITTY_BAR_ALT_IMAGE_ID).as_bytes(),
+        );
         let _ = stdout.flush();
     }
     if KEYBOARD_FLAGS_PUSHED.swap(false, Ordering::SeqCst) {

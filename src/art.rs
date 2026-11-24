@@ -15,6 +15,10 @@ use crate::domain::{CoverArt, TrackId};
 
 const MAX_COVER_DIMENSION: u32 = 512;
 const KITTY_CHUNK_SIZE: usize = 4096;
+pub const KITTY_COVER_IMAGE_ID: u32 = 1;
+pub const KITTY_BAR_IMAGE_ID: u32 = 2;
+pub const KITTY_BAR_ALT_IMAGE_ID: u32 = 3;
+pub const BAR_CELL_W: u32 = 16;
 
 /// Terminal cover-art rendering protocol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -214,18 +218,24 @@ fn corner_signed_distance(x: u32, y: u32, width: u32, height: u32, radius: f32) 
     }
 }
 
-/// Encodes `art.encoded_png` as a cursor-positioned, chunked Kitty Graphics Protocol sequence.
-pub fn kitty_transmit_and_place(art: &CoverArt, area: Rect) -> String {
-    if area.width == 0 || area.height == 0 || art.encoded_png.is_empty() {
+/// Encodes `png_bytes` as a cursor-positioned, chunked Kitty Graphics Protocol sequence for `next_id`,
+/// optionally deleting `prev_id` after placement inside the same synchronized update.
+pub fn kitty_swap_image_png(
+    png_bytes: &[u8],
+    area: Rect,
+    next_id: u32,
+    prev_id: Option<u32>,
+) -> String {
+    if area.width == 0 || area.height == 0 || png_bytes.is_empty() {
         return String::new();
     }
 
-    let encoded = BASE64_STANDARD.encode(&art.encoded_png);
+    let encoded = BASE64_STANDARD.encode(png_bytes);
     let chunks: Vec<&[u8]> = encoded.as_bytes().chunks(KITTY_CHUNK_SIZE).collect();
     let total = chunks.len();
 
-    let mut out = String::with_capacity(encoded.len() + 64 * total);
-    let _ = write!(out, "\x1b[{};{}H", area.y + 1, area.x + 1);
+    let mut out = String::with_capacity(encoded.len() + 64 * total + 64);
+    let _ = write!(out, "\x1b[?2026h\x1b7\x1b[{};{}H", area.y + 1, area.x + 1);
 
     for (idx, chunk) in chunks.into_iter().enumerate() {
         let more = usize::from(idx + 1 < total);
@@ -233,7 +243,7 @@ pub fn kitty_transmit_and_place(art: &CoverArt, area: Rect) -> String {
         if idx == 0 {
             let _ = write!(
                 out,
-                "\x1b_Ga=T,f=100,i=1,c={},r={},q=2,m={more};{chunk_str}\x1b\\",
+                "\x1b_Ga=T,f=100,i={next_id},p=1,c={},r={},C=1,q=2,m={more};{chunk_str}\x1b\\",
                 area.width, area.height
             );
         } else {
@@ -241,12 +251,82 @@ pub fn kitty_transmit_and_place(art: &CoverArt, area: Rect) -> String {
         }
     }
 
+    if let Some(old) = prev_id
+        && old != next_id
+    {
+        out.push_str(&kitty_clear_image_id(old));
+    }
+
+    out.push_str("\x1b8\x1b[?2026l");
     out
+}
+
+/// Encodes `png_bytes` as a cursor-positioned, chunked Kitty Graphics Protocol sequence for `image_id`.
+pub fn kitty_transmit_and_place_png(png_bytes: &[u8], area: Rect, image_id: u32) -> String {
+    kitty_swap_image_png(png_bytes, area, image_id, None)
+}
+
+/// Encodes `art.encoded_png` as a cursor-positioned, chunked Kitty Graphics Protocol sequence.
+pub fn kitty_transmit_and_place(art: &CoverArt, area: Rect) -> String {
+    kitty_transmit_and_place_png(&art.encoded_png, area, KITTY_COVER_IMAGE_ID)
+}
+
+/// Returns the Kitty Graphics Protocol escape sequence that deletes `image_id`.
+pub fn kitty_clear_image_id(image_id: u32) -> String {
+    format!("\x1b_Ga=d,d=I,i={image_id},q=2\x1b\\")
 }
 
 /// Returns the Kitty Graphics Protocol escape sequence that deletes image ID 1.
 pub fn kitty_clear_image() -> &'static str {
     "\x1b_Ga=d,d=I,i=1,q=2\x1b\\"
+}
+
+/// Renders a vertically centered progress bar with subtle rounded corners as PNG bytes.
+pub fn render_progress_bar_png(
+    cols: u16,
+    ratio: f64,
+    filled_rgb: [u8; 3],
+    empty_rgb: [u8; 3],
+) -> Vec<u8> {
+    if cols == 0 {
+        return Vec::new();
+    }
+
+    const CELL_H: u32 = 32;
+    const BAR_Y_START: u32 = 8;
+    const BAR_Y_END: u32 = 24;
+    const BAR_H: u32 = BAR_Y_END - BAR_Y_START;
+    const CORNER_RADIUS: f32 = 4.0;
+
+    let w = u32::from(cols) * BAR_CELL_W;
+    let h = CELL_H;
+    let fill_exact = ratio.clamp(0.0, 1.0) * f64::from(w);
+
+    let mut rgba_img = RgbaImage::new(w, h);
+    for y in BAR_Y_START..BAR_Y_END {
+        let local_y = y - BAR_Y_START;
+        for x in 0..w {
+            let d = corner_signed_distance(x, local_y, w, BAR_H, CORNER_RADIUS);
+            let alpha = ((0.5 - d).clamp(0.0, 1.0) * 255.0).round() as u8;
+            let coverage = (fill_exact - f64::from(x)).clamp(0.0, 1.0);
+            let r = (f64::from(empty_rgb[0]) * (1.0 - coverage)
+                + f64::from(filled_rgb[0]) * coverage)
+                .round() as u8;
+            let g = (f64::from(empty_rgb[1]) * (1.0 - coverage)
+                + f64::from(filled_rgb[1]) * coverage)
+                .round() as u8;
+            let b = (f64::from(empty_rgb[2]) * (1.0 - coverage)
+                + f64::from(filled_rgb[2]) * coverage)
+                .round() as u8;
+            rgba_img.put_pixel(x, y, Rgba([r, g, b, alpha]));
+        }
+    }
+
+    let mut png_bytes = Vec::new();
+    rgba_img
+        .write_to(&mut Cursor::new(&mut png_bytes), ImageFormat::Png)
+        .expect("PNG encoding of non-empty RGBA buffer should succeed");
+    png_bytes
 }
 
 /// Errors produced when decoding or normalizing cover art images.
@@ -508,8 +588,12 @@ mod tests {
             ""
         );
         let single = kitty_transmit_and_place(&small_art, Rect::new(4, 2, 12, 6));
-        assert!(single.starts_with("\x1b[3;5H\x1b_Ga=T,f=100,i=1,c=12,r=6,q=2,m=0;"));
-        assert!(single.ends_with("\x1b\\"));
+        assert!(
+            single.starts_with(
+                "\x1b[?2026h\x1b7\x1b[3;5H\x1b_Ga=T,f=100,i=1,p=1,c=12,r=6,C=1,q=2,m=0;"
+            )
+        );
+        assert!(single.ends_with("\x1b\\\x1b8\x1b[?2026l"));
         assert!(!single.contains("\x1b_Gm="));
 
         let large_art = CoverArt {
@@ -517,9 +601,13 @@ mod tests {
             ..empty_art
         };
         let multi = kitty_transmit_and_place(&large_art, Rect::new(1, 1, 8, 4));
-        assert!(multi.starts_with("\x1b[2;2H\x1b_Ga=T,f=100,i=1,c=8,r=4,q=2,m=1;"));
+        assert!(
+            multi.starts_with(
+                "\x1b[?2026h\x1b7\x1b[2;2H\x1b_Ga=T,f=100,i=1,p=1,c=8,r=4,C=1,q=2,m=1;"
+            )
+        );
         assert!(multi.contains("\x1b_Gm=0;"));
-        assert!(multi.ends_with("\x1b\\"));
+        assert!(multi.ends_with("\x1b\\\x1b8\x1b[?2026l"));
     }
 
     #[test]
@@ -541,5 +629,69 @@ mod tests {
         assert_eq!(decoded.get_pixel(0, 63).0[3], 0);
         assert_eq!(decoded.get_pixel(63, 63).0[3], 0);
         assert_eq!(decoded.get_pixel(32, 32).0[3], 255);
+    }
+
+    #[test]
+    fn render_progress_bar_png_draws_subtly_rounded_split_bar_and_guards_zero_cols() {
+        assert!(render_progress_bar_png(0, 0.5, [125, 207, 255], [86, 95, 137]).is_empty());
+
+        let filled = [125, 207, 255];
+        let empty = [86, 95, 137];
+        let png = render_progress_bar_png(10, 80.5 / 160.0, filled, empty);
+        let decoded = image::load_from_memory(&png).unwrap().into_rgba8();
+
+        assert_eq!(decoded.dimensions(), (160, 32));
+        assert_eq!(decoded.get_pixel(10, 0).0[3], 0);
+        assert_eq!(decoded.get_pixel(10, 31).0[3], 0);
+        assert_eq!(decoded.get_pixel(0, 8).0[3], 0);
+        assert_eq!(decoded.get_pixel(159, 8).0[3], 0);
+        assert_eq!(
+            decoded.get_pixel(79, 16).0,
+            [filled[0], filled[1], filled[2], 255]
+        );
+        assert_eq!(
+            decoded.get_pixel(81, 16).0,
+            [empty[0], empty[1], empty[2], 255]
+        );
+        let edge = decoded.get_pixel(80, 16).0;
+        assert_eq!(edge[3], 255);
+        for c in 0..3 {
+            let lo = filled[c].min(empty[c]);
+            let hi = filled[c].max(empty[c]);
+            assert!(edge[c] > lo && edge[c] < hi);
+        }
+    }
+
+    #[test]
+    fn kitty_transmit_and_clear_support_explicit_image_id() {
+        let seq = kitty_transmit_and_place_png(b"png", Rect::new(2, 4, 20, 1), KITTY_BAR_IMAGE_ID);
+        assert!(
+            seq.starts_with(
+                "\x1b[?2026h\x1b7\x1b[5;3H\x1b_Ga=T,f=100,i=2,p=1,c=20,r=1,C=1,q=2,m=0;"
+            )
+        );
+        assert!(seq.ends_with("\x1b\\\x1b8\x1b[?2026l"));
+        assert_eq!(kitty_clear_image_id(2), "\x1b_Ga=d,d=I,i=2,q=2\x1b\\");
+    }
+
+    #[test]
+    fn kitty_swap_image_png_places_next_before_deleting_prev_inside_sync_update() {
+        let seq = kitty_swap_image_png(
+            b"png",
+            Rect::new(2, 4, 20, 1),
+            KITTY_BAR_ALT_IMAGE_ID,
+            Some(KITTY_BAR_IMAGE_ID),
+        );
+        assert!(seq.starts_with("\x1b[?2026h\x1b7\x1b[5;3H"));
+        assert!(seq.ends_with("\x1b8\x1b[?2026l"));
+
+        let place_idx = seq.find("a=T,f=100,i=3,").unwrap();
+        let delete_idx = seq.find("\x1b_Ga=d,d=I,i=2,q=2\x1b\\").unwrap();
+        let sync_end_idx = seq.find("\x1b8\x1b[?2026l").unwrap();
+        assert!(place_idx < delete_idx);
+        assert!(delete_idx < sync_end_idx);
+
+        let same_id = kitty_swap_image_png(b"png", Rect::new(2, 4, 20, 1), 2, Some(2));
+        assert!(!same_id.contains("a=d,d=I,i=2"));
     }
 }

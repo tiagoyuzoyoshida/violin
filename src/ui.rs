@@ -33,23 +33,31 @@ fn rounded_block<'a>(title: impl Into<Line<'a>>) -> Block<'a> {
         .title(title)
 }
 
-/// Renders the entire `AppState` into the given `ratatui::Frame`.
-pub fn render(frame: &mut Frame, state: &AppState) {
-    let _ = render_with_protocol(frame, state, ArtProtocol::HalfBlock);
+/// Terminal cell rectangles reserved for Kitty Graphics Protocol overlays.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct OverlayRects {
+    pub art_rect: Option<Rect>,
+    pub bar_rect: Option<Rect>,
 }
 
-/// Renders `AppState` using `protocol` for cover art, returning the cover-art `Rect` in Focus mode.
+/// Renders the entire `AppState` into the given `ratatui::Frame`.
+pub fn render(frame: &mut Frame, state: &AppState) {
+    let _ = render_with_protocol(frame, state, ArtProtocol::HalfBlock, ArtProtocol::HalfBlock);
+}
+
+/// Renders `AppState` using `art_protocol` for cover art and `bar_protocol` for the progress bar.
 pub fn render_with_protocol(
     frame: &mut Frame,
     state: &AppState,
-    protocol: ArtProtocol,
-) -> Option<Rect> {
+    art_protocol: ArtProtocol,
+    bar_protocol: ArtProtocol,
+) -> OverlayRects {
     if state.focus_mode {
-        return render_focus_view(frame, state, protocol);
+        return render_focus_view(frame, state, art_protocol, bar_protocol);
     }
 
     let has_footer = state.status_message.is_some() || state.notice_message.is_some();
-    if has_footer {
+    let bar_rect = if has_footer {
         let [header_area, body_area, now_playing_area, footer_area] = Layout::vertical([
             Constraint::Length(3),
             Constraint::Min(5),
@@ -59,8 +67,9 @@ pub fn render_with_protocol(
         .areas(frame.area());
         render_header(frame, header_area, state);
         render_body(frame, body_area, state);
-        render_now_playing(frame, now_playing_area, state);
+        let bar_rect = render_now_playing(frame, now_playing_area, state, bar_protocol);
         render_footer(frame, footer_area, state);
+        bar_rect
     } else {
         let [header_area, body_area, now_playing_area] = Layout::vertical([
             Constraint::Length(3),
@@ -70,8 +79,8 @@ pub fn render_with_protocol(
         .areas(frame.area());
         render_header(frame, header_area, state);
         render_body(frame, body_area, state);
-        render_now_playing(frame, now_playing_area, state);
-    }
+        render_now_playing(frame, now_playing_area, state, bar_protocol)
+    };
 
     match state.input_mode {
         InputMode::CreatePlaylistInput => render_text_modal(
@@ -93,13 +102,21 @@ pub fn render_with_protocol(
         InputMode::Normal | InputMode::SearchInput => {}
     }
 
-    None
+    OverlayRects {
+        art_rect: None,
+        bar_rect,
+    }
 }
 
-fn render_focus_view(frame: &mut Frame, state: &AppState, protocol: ArtProtocol) -> Option<Rect> {
+fn render_focus_view(
+    frame: &mut Frame,
+    state: &AppState,
+    art_protocol: ArtProtocol,
+    bar_protocol: ArtProtocol,
+) -> OverlayRects {
     let area = frame.area();
     if area.width == 0 || area.height == 0 {
-        return None;
+        return OverlayRects::default();
     }
 
     let title_x = if area.width > 1 { area.x + 1 } else { area.x };
@@ -130,7 +147,7 @@ fn render_focus_view(frame: &mut Frame, state: &AppState, protocol: ArtProtocol)
         && art_rect.height > 0
         && let Some(art) = &state.cover_art
     {
-        match protocol {
+        match art_protocol {
             ArtProtocol::HalfBlock => {
                 let lines = art::render_retro_art_lines(art, art_rect.width, art_rect.height);
                 frame.render_widget(Paragraph::new(lines), art_rect);
@@ -142,32 +159,40 @@ fn render_focus_view(frame: &mut Frame, state: &AppState, protocol: ArtProtocol)
     let bar_w = art_cols.max(20).min(area.width.saturating_sub(4));
     let bar_x = area.x + area.width.saturating_sub(bar_w) / 2;
     let bar_y = top_y + art_rows + 1;
-    if bar_w > 0 && bar_y < area.y + area.height {
-        let ratio = playback_ratio(state.now_playing.as_ref());
-        let (filled_fg, empty_bg) = if state
-            .now_playing
-            .as_ref()
-            .is_some_and(|np| np.status == PlaybackStatus::Playing)
-        {
-            (Color::Cyan, Color::DarkGray)
-        } else {
-            (Color::Rgb(110, 110, 110), Color::Rgb(45, 45, 45))
-        };
-        frame.render_widget(
-            Paragraph::new(build_progress_bar_line_styled(
-                ratio,
-                usize::from(bar_w),
-                filled_fg,
-                empty_bg,
-            )),
-            Rect::new(bar_x, bar_y, bar_w, 1),
-        );
-    }
-
-    if art_rect.width > 0 && art_rect.height > 0 {
-        Some(art_rect)
+    let bar_rect = if bar_w > 0 && bar_y < area.y + area.height {
+        let rect = Rect::new(bar_x, bar_y, bar_w, 1);
+        match bar_protocol {
+            ArtProtocol::HalfBlock => {
+                let ratio = playback_ratio(state.now_playing.as_ref());
+                let (filled_fg, empty_bg) = if state
+                    .now_playing
+                    .as_ref()
+                    .is_some_and(|np| np.status == PlaybackStatus::Playing)
+                {
+                    (Color::Cyan, Color::DarkGray)
+                } else {
+                    (Color::Rgb(110, 110, 110), Color::Rgb(45, 45, 45))
+                };
+                frame.render_widget(
+                    Paragraph::new(build_progress_bar_line_styled(
+                        ratio,
+                        usize::from(bar_w),
+                        filled_fg,
+                        empty_bg,
+                    )),
+                    rect,
+                );
+                None
+            }
+            ArtProtocol::Kitty => Some(rect),
+        }
     } else {
         None
+    };
+
+    OverlayRects {
+        art_rect: (art_rect.width > 0 && art_rect.height > 0).then_some(art_rect),
+        bar_rect,
     }
 }
 
@@ -693,7 +718,12 @@ fn render_album_table(
     frame.render_stateful_widget(table, area, &mut table_state);
 }
 
-fn render_now_playing(frame: &mut Frame, area: Rect, state: &AppState) {
+fn render_now_playing(
+    frame: &mut Frame,
+    area: Rect,
+    state: &AppState,
+    bar_protocol: ArtProtocol,
+) -> Option<Rect> {
     let shuffle_active =
         state.shuffle && matches!(state.queue_context, QueueContext::Collection { .. });
     let title = if shuffle_active {
@@ -753,16 +783,25 @@ fn render_now_playing(frame: &mut Frame, area: Rect, state: &AppState) {
             .areas(progress_area);
 
     let bar_width = bar_area.width as usize;
-    if bar_width > 0 {
-        frame.render_widget(
-            Paragraph::new(build_progress_bar_line(ratio, bar_width)),
-            bar_area,
-        );
-    }
+    let bar_rect = if bar_width > 0 {
+        match bar_protocol {
+            ArtProtocol::HalfBlock => {
+                frame.render_widget(
+                    Paragraph::new(build_progress_bar_line(ratio, bar_width)),
+                    bar_area,
+                );
+                None
+            }
+            ArtProtocol::Kitty => Some(bar_area),
+        }
+    } else {
+        None
+    };
     frame.render_widget(
         Paragraph::new(time_label).style(Style::default().fg(Color::DarkGray)),
         time_area,
     );
+    bar_rect
 }
 
 fn playback_ratio(now_playing: Option<&NowPlaying>) -> f64 {
@@ -1625,7 +1664,7 @@ mod tests {
     }
 
     #[test]
-    fn focus_mode_with_kitty_protocol_leaves_art_rect_blank_and_returns_rect() {
+    fn focus_mode_with_kitty_protocol_leaves_art_and_bar_rects_blank_and_returns_rects() {
         let mut state = AppState::new();
         state.focus_mode = true;
         state.now_playing = Some(NowPlaying {
@@ -1637,15 +1676,22 @@ mod tests {
 
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
-        let mut returned_rect = None;
+        let mut overlays = OverlayRects::default();
         terminal
             .draw(|frame| {
-                returned_rect = render_with_protocol(frame, &state, ArtProtocol::Kitty);
+                overlays =
+                    render_with_protocol(frame, &state, ArtProtocol::Kitty, ArtProtocol::Kitty);
             })
             .unwrap();
 
-        let rect = returned_rect.expect("expected Some(art_rect) in focus mode");
+        let rect = overlays
+            .art_rect
+            .expect("expected Some(art_rect) in focus mode");
         assert!(rect.width > 0 && rect.height > 0);
+        let bar_rect = overlays
+            .bar_rect
+            .expect("expected Some(bar_rect) in focus mode");
+        assert!(bar_rect.width > 0 && bar_rect.height == 1);
 
         let buf = terminal.backend().buffer();
         for y in rect.y..rect.y + rect.height {
@@ -1654,10 +1700,41 @@ mod tests {
                 assert_eq!(buf[(x, y)].symbol(), " ");
             }
         }
-        let has_dim_bar = (0..buf.area.height).any(|y| {
-            (0..buf.area.width)
-                .any(|x| buf[(x, y)].symbol() == "█" && buf[(x, y)].fg == Color::Rgb(110, 110, 110))
+        for x in bar_rect.x..bar_rect.x + bar_rect.width {
+            assert_eq!(buf[(x, bar_rect.y)].symbol(), " ");
+            assert_eq!(buf[(x, bar_rect.y)].bg, Color::Reset);
+        }
+    }
+
+    #[test]
+    fn normal_mode_with_kitty_bar_protocol_leaves_bar_rect_blank_and_returns_rect() {
+        let mut state = AppState::new();
+        state.now_playing = Some(NowPlaying {
+            track: make_track("t1", "Chaconne", 120),
+            status: PlaybackStatus::Playing,
+            position: Duration::from_secs(30),
         });
-        assert!(has_dim_bar);
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut overlays = OverlayRects::default();
+        terminal
+            .draw(|frame| {
+                overlays =
+                    render_with_protocol(frame, &state, ArtProtocol::HalfBlock, ArtProtocol::Kitty);
+            })
+            .unwrap();
+
+        assert_eq!(overlays.art_rect, None);
+        let bar_rect = overlays
+            .bar_rect
+            .expect("expected Some(bar_rect) in normal mode");
+        assert!(bar_rect.width > 0 && bar_rect.height == 1);
+
+        let buf = terminal.backend().buffer();
+        for x in bar_rect.x..bar_rect.x + bar_rect.width {
+            assert_eq!(buf[(x, bar_rect.y)].symbol(), " ");
+            assert_eq!(buf[(x, bar_rect.y)].bg, Color::Reset);
+        }
     }
 }
