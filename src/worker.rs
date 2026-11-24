@@ -176,6 +176,32 @@ pub async fn run_spotify_worker(
                 },
                 Err(msg) => AppEvent::Error(msg),
             },
+            Command::FetchCoverArt {
+                track_id,
+                cover_url,
+            } => {
+                let resolved_url = match cover_url {
+                    Some(url) => Some(url),
+                    None => match ensure_session(&auth, &mut session).await {
+                        Ok(sess) => client
+                            .fetch_track_cover_url(&sess, &track_id)
+                            .await
+                            .ok()
+                            .flatten(),
+                        Err(_) => None,
+                    },
+                };
+                match resolved_url {
+                    Some(url) => match client.fetch_image_bytes(&url).await {
+                        Ok(bytes) => match crate::art::decode_cover_art(track_id.clone(), &bytes) {
+                            Ok(art) => AppEvent::CoverArtLoaded(art),
+                            Err(_) => AppEvent::CoverArtFailed { track_id },
+                        },
+                        Err(_) => AppEvent::CoverArtFailed { track_id },
+                    },
+                    None => AppEvent::CoverArtFailed { track_id },
+                }
+            }
             Command::PlayTrack(_)
             | Command::PausePlayback
             | Command::ResumePlayback

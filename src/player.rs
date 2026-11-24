@@ -146,7 +146,8 @@ pub fn build_soloist_command_json(cmd: &Command) -> Option<String> {
         | Command::FetchJamSession
         | Command::CreateJamSession
         | Command::JoinJamSession(_)
-        | Command::LeaveJamSession { .. } => {
+        | Command::LeaveJamSession { .. }
+        | Command::FetchCoverArt { .. } => {
             return None;
         }
     };
@@ -232,6 +233,41 @@ pub fn parse_soloist_event(raw: &str, active_track_uri: Option<&str>) -> Option<
     }
 }
 
+fn extract_soloist_cover_url(decorations: Option<&serde_json::Value>) -> Option<String> {
+    let decorations = decorations?;
+    let images = decorations
+        .get("parent")
+        .and_then(|p| p.get("entity"))
+        .and_then(|e| e.get("decorations"))
+        .and_then(|d| d.get("images"))
+        .and_then(serde_json::Value::as_array)
+        .or_else(|| {
+            decorations
+                .get("images")
+                .and_then(serde_json::Value::as_array)
+        })?;
+
+    for image in images {
+        if let Some(url) = image
+            .get("url")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            return Some(url.to_string());
+        }
+        if let Some(id) = image
+            .get("uri")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|u| u.trim().strip_prefix("spotify:image:"))
+            .filter(|id| !id.is_empty())
+        {
+            return Some(format!("https://i.scdn.co/image/{id}"));
+        }
+    }
+    None
+}
+
 fn parse_soloist_item_track(item: &serde_json::Value) -> Option<Track> {
     let uri = item.get("uri")?.as_str()?;
     let raw_id = uri.strip_prefix("spotify:track:")?;
@@ -304,12 +340,15 @@ fn parse_soloist_item_track(item: &serde_json::Value) -> Option<Track> {
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);
 
+    let cover_url = extract_soloist_cover_url(decorations);
+
     Some(Track {
         id,
         title: title.to_string(),
         artists,
         album_name,
         duration: Duration::from_millis(duration_ms),
+        cover_url,
     })
 }
 
@@ -958,6 +997,7 @@ mod tests {
             artists: vec!["Artist".to_string()],
             album_name: "Album".to_string(),
             duration: Duration::from_secs(180),
+            cover_url: None,
         }
     }
 
@@ -1093,6 +1133,7 @@ mod tests {
             artists: vec!["Artist".to_string()],
             album_name: "Album".to_string(),
             duration: Duration::from_secs(60),
+            cover_url: None,
         };
         assert_eq!(
             build_soloist_command_json(&Command::FetchTrackRadio(track)),
@@ -1239,6 +1280,7 @@ mod tests {
                     artists: vec!["Artist One".to_string(), "Artist Two".to_string()],
                     album_name: "Album Name".to_string(),
                     duration: Duration::from_millis(210_000),
+                    cover_url: None,
                 },
                 position: Duration::from_millis(15_000),
                 status: PlaybackStatus::Paused,
@@ -1251,6 +1293,49 @@ mod tests {
                 15_000
             )))
         );
+
+        let with_cover_url = r#"{
+            "type": "playback_state",
+            "status": "playing",
+            "position": {"position_ms": 0},
+            "item": {
+                "uri": "spotify:track:333",
+                "decorations": {
+                    "identity": {"name": "With Url"},
+                    "parent": {
+                        "entity": {
+                            "decorations": {
+                                "identity": {"name": "Album"},
+                                "images": [{"url": "https://i.scdn.co/image/abc"}]
+                            }
+                        }
+                    }
+                }
+            }
+        }"#;
+        assert!(matches!(
+            parse_soloist_event(with_cover_url, None),
+            Some(AppEvent::TrackSynced { ref track, .. })
+                if track.cover_url.as_deref() == Some("https://i.scdn.co/image/abc")
+        ));
+
+        let with_cover_uri = r#"{
+            "type": "playback_state",
+            "status": "playing",
+            "position": {"position_ms": 0},
+            "item": {
+                "uri": "spotify:track:444",
+                "decorations": {
+                    "identity": {"name": "With Uri"},
+                    "images": [{"uri": "spotify:image:def123"}]
+                }
+            }
+        }"#;
+        assert!(matches!(
+            parse_soloist_event(with_cover_uri, None),
+            Some(AppEvent::TrackSynced { ref track, .. })
+                if track.cover_url.as_deref() == Some("https://i.scdn.co/image/def123")
+        ));
     }
 
     #[test]
@@ -1326,6 +1411,7 @@ mod tests {
                 artists: vec!["Bach".to_string()],
                 album_name: "Orchestral Suites".to_string(),
                 duration: Duration::from_millis(200_000),
+                cover_url: None,
             }]))
         );
 
@@ -1348,6 +1434,7 @@ mod tests {
                 artists: vec!["Bach".to_string()],
                 album_name: "Partita No. 2".to_string(),
                 duration: Duration::ZERO,
+                cover_url: None,
             }]))
         );
     }

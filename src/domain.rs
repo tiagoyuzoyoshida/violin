@@ -60,6 +60,17 @@ pub struct Track {
     pub artists: Vec<String>,
     pub album_name: String,
     pub duration: Duration,
+    pub cover_url: Option<String>,
+}
+
+/// Decoded cover art image ready for terminal rendering.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoverArt {
+    pub track_id: TrackId,
+    pub width: u32,
+    pub height: u32,
+    pub rgb: std::sync::Arc<[u8]>,
+    pub encoded_png: std::sync::Arc<[u8]>,
 }
 
 impl Track {
@@ -213,6 +224,7 @@ mod tests {
             artists: vec!["Artist A".to_string(), "Artist B".to_string()],
             album_name: "Album".to_string(),
             duration: Duration::from_secs(180),
+            cover_url: None,
         }
     }
 

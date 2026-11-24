@@ -506,6 +506,34 @@ impl SpotifyClient {
             .map_err(|err| SpotifyError::SpClient(format!("invalid UTF-8 in collection: {err}")))
     }
 
+    /// Resolves a track's cover art URL from extended metadata when not already known.
+    pub async fn fetch_track_cover_url(
+        &self,
+        session: &Session,
+        track_id: &TrackId,
+    ) -> Result<Option<String>, SpotifyError> {
+        let uri = format!("spotify:track:{}", track_id.as_str());
+        let tracks = self.fetch_tracks_by_uris(session, &[uri], "").await?;
+        Ok(tracks.into_iter().next().and_then(|t| t.cover_url))
+    }
+
+    /// Fetches raw image bytes from a cover art CDN URL.
+    pub async fn fetch_image_bytes(&self, url: &str) -> Result<Vec<u8>, SpotifyError> {
+        let response = self.http.get(url).send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(SpotifyError::Api {
+                status: status.as_u16(),
+                message: status
+                    .canonical_reason()
+                    .unwrap_or("image fetch failed")
+                    .to_string(),
+            });
+        }
+        let bytes = response.bytes().await?;
+        Ok(bytes.to_vec())
+    }
+
     async fn fetch_tracks_by_uris(
         &self,
         session: &Session,
@@ -671,6 +699,20 @@ struct PathfinderArtistProfile {
 #[derive(Debug, Deserialize)]
 struct PathfinderTrackAlbum {
     name: String,
+    #[serde(rename = "coverArt")]
+    cover_art: Option<PathfinderCoverArt>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PathfinderCoverArt {
+    #[serde(default)]
+    sources: Vec<PathfinderCoverSource>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PathfinderCoverSource {
+    url: String,
+    width: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -724,6 +766,55 @@ fn gid_to_base62(gid: &[u8]) -> Result<String, SpotifyError> {
         .map_err(|err| SpotifyError::SpClient(format!("failed to encode Spotify ID: {err}")))
 }
 
+/// Formats a Spotify image `file_id` byte slice into an `i.scdn.co` cover URL.
+pub fn cover_url_from_file_id(file_id: &[u8]) -> Option<String> {
+    if file_id.is_empty() {
+        return None;
+    }
+    use std::fmt::Write;
+    let mut hex = String::with_capacity(file_id.len() * 2);
+    for byte in file_id {
+        let _ = write!(hex, "{byte:02x}");
+    }
+    Some(format!("https://i.scdn.co/image/{hex}"))
+}
+
+fn extract_pathfinder_cover_url(cover_art: Option<&PathfinderCoverArt>) -> Option<String> {
+    let sources = &cover_art?.sources;
+    let mut best: Option<(&str, u32)> = None;
+    for source in sources {
+        let url = source.url.trim();
+        if url.is_empty() {
+            continue;
+        }
+        let width = source.width.unwrap_or(0);
+        if best.is_none_or(|(_, best_width)| width > best_width) {
+            best = Some((url, width));
+        }
+    }
+    best.map(|(url, _)| url.to_string())
+}
+
+fn extract_proto_cover_url(album: &proto_metadata::Album) -> Option<String> {
+    let images = if !album.cover_group.image.is_empty() {
+        &album.cover_group.image
+    } else {
+        &album.cover
+    };
+    let mut best: Option<(&[u8], i32)> = None;
+    for image in images {
+        let file_id = image.file_id();
+        if file_id.is_empty() {
+            continue;
+        }
+        let width = image.width();
+        if best.is_none_or(|(_, best_width)| width > best_width) {
+            best = Some((file_id, width));
+        }
+    }
+    best.and_then(|(file_id, _)| cover_url_from_file_id(file_id))
+}
+
 /// Deserializes a Spotify desktop Pathfinder `searchDesktop` JSON response into `SearchResults`.
 pub fn parse_pathfinder_search_response(body: &str) -> Result<SearchResults, SpotifyError> {
     let parsed: PathfinderSearchResponse = serde_json::from_str(body)?;
@@ -749,12 +840,20 @@ pub fn parse_pathfinder_search_response(body: &str) -> Result<SearchResults, Spo
                     .unwrap_or_default()
                     .to_string(),
             };
+            let (album_name, cover_url) = match track.album {
+                Some(album) => {
+                    let cover_url = extract_pathfinder_cover_url(album.cover_art.as_ref());
+                    (album.name, cover_url)
+                }
+                None => (String::new(), None),
+            };
             tracks.push(Track {
                 id: TrackId::new(raw_id)?,
                 title: track.name,
                 artists: extract_pathfinder_artists(track.artists),
-                album_name: track.album.map(|a| a.name).unwrap_or_default(),
+                album_name,
                 duration: Duration::from_millis(track.duration.map_or(0, |d| d.total_milliseconds)),
+                cover_url,
             });
         }
     }
@@ -1198,6 +1297,7 @@ pub fn parse_track_metadata_proto(
         proto.album.name().to_string()
     };
     let duration = Duration::from_millis(u64::try_from(proto.duration()).unwrap_or(0));
+    let cover_url = proto.album.as_ref().and_then(extract_proto_cover_url);
 
     Ok(Track {
         id,
@@ -1205,6 +1305,7 @@ pub fn parse_track_metadata_proto(
         artists,
         album_name,
         duration,
+        cover_url,
     })
 }
 
@@ -1413,6 +1514,74 @@ mod tests {
         let parsed_with_album =
             parse_track_metadata_proto(&bytes_with_album, "Moonlight Sonata").unwrap();
         assert_eq!(parsed_with_album.album_name, "Piano Sonatas");
+        assert_eq!(parsed_with_album.cover_url, None);
+    }
+
+    #[test]
+    fn parse_track_metadata_proto_extracts_largest_cover_file_id() {
+        let track_id = SpotifyId::from_base62("11dFghVXANMlKmJXsNCbNl").unwrap();
+        let mut track = proto_metadata::Track::new();
+        track.set_gid(track_id.to_raw().to_vec());
+        track.set_name("Track".to_string());
+
+        let mut small = proto_metadata::Image::new();
+        small.set_file_id(vec![0xab, 0xcd]);
+        small.set_width(64);
+        let mut large = proto_metadata::Image::new();
+        large.set_file_id(vec![0x01, 0x23, 0xef]);
+        large.set_width(640);
+
+        let mut cover_group = proto_metadata::ImageGroup::new();
+        cover_group.image = vec![small, large];
+
+        let mut album = proto_metadata::Album::new();
+        album.set_name("Album".to_string());
+        album.cover_group = MessageField::some(cover_group);
+        track.album = MessageField::some(album);
+
+        let bytes = track.write_to_bytes().unwrap();
+        let parsed = parse_track_metadata_proto(&bytes, "").unwrap();
+        assert_eq!(
+            parsed.cover_url.as_deref(),
+            Some("https://i.scdn.co/image/0123ef")
+        );
+    }
+
+    #[test]
+    fn parse_pathfinder_search_response_extracts_largest_cover_art_source() {
+        let payload = r#"{
+            "data": {
+                "search": {
+                    "tracks": {
+                        "items": [
+                            {
+                                "track": {
+                                    "id": "trk_cover",
+                                    "name": "Covered",
+                                    "artists": {"items": []},
+                                    "album": {
+                                        "name": "Album",
+                                        "coverArt": {
+                                            "sources": [
+                                                {"url": "https://i.scdn.co/image/small", "width": 64},
+                                                {"url": "https://i.scdn.co/image/large", "width": 640},
+                                                {"url": "https://i.scdn.co/image/medium", "width": 300}
+                                            ]
+                                        }
+                                    },
+                                    "duration": {"totalMilliseconds": 1000}
+                                }
+                            }
+                        ]
+                    }
+                }
+            }
+        }"#;
+        let results = parse_pathfinder_search_response(payload).unwrap();
+        assert_eq!(
+            results.tracks[0].cover_url.as_deref(),
+            Some("https://i.scdn.co/image/large")
+        );
     }
 
     #[test]

@@ -14,7 +14,7 @@ Measured on Linux `x86_64` while streaming audio:
 
 - **~70 MB live RAM** (`~13 MB` `violin` TUI + `~58 MB` Spotify headless `soloist` engine) vs **~400–700 MB** for the official Chromium-based desktop client.
 - **~48 MB on disk** (`13 MB` static binary + `35 MB` `soloist`) vs **~370 MB** for the official desktop client.
-- **Zero Chromium / GPU processes** and instant (<50 ms) startup. `violin` trades album art and GUI chrome for low resource usage and pure keyboard speed.
+- **Zero Chromium / GPU processes** and instant (<50 ms) startup. `violin` trades GUI chrome for low resource usage and keyboard speed, with optional album cover art in Focus mode.
 
 ## Features
 
@@ -23,6 +23,7 @@ Measured on Linux `x86_64` while streaming audio:
 - **Library & playlists:** Browse Liked Songs, playlists, folders, and saved albums; like/unlike tracks, create playlists, and add tracks to playlists.
 - **Live queue:** Inspect the current playback queue and jump between tracks.
 - **Spotify Jam:** Start a new Jam (auto-copying the invite link to the clipboard), join by link or token, refresh, and leave or end sessions.
+- **Focus / Standby mode:** Press `m` for a frameless now-playing view with album cover art (native Kitty graphics or Unicode quadrant-block fallback) and a progress bar that dims when paused.
 - **Custom keybindings:** Remap any Normal-mode action in `~/.config/violin/config.toml`.
 
 ## Quick install
@@ -104,6 +105,8 @@ export VIOLIN_CLIENT_ID="your_spotify_client_id"
 | `Left` / `Right` | Seek backward / forward by 5s |
 | `Up` / `Down` | Increase / decrease volume |
 | `z` | Toggle shuffle (album / playlist queues only) |
+| `m` | Toggle Focus / Standby mode |
+| `t` | Toggle retro pixelized album art in Focus mode |
 | `f` | Like / unlike focused or playing track |
 | `c` | Create a new playlist |
 | `a` | Add focused or playing track to a playlist |
@@ -138,9 +141,13 @@ move_down = ["j", "pagedown"]
 quit = ["q", "ctrl+q"]
 ```
 
-Configurable action names: `quit`, `search`, `toggle_view`, `previous_view`, `view_search`, `view_albums`, `view_queue`, `view_jam`, `toggle_search_section`, `move_down`, `move_up`, `select`, `play_selected`, `back`, `play_pause`, `next_track`, `previous_track`, `seek_backward`, `seek_forward`, `volume_up`, `volume_down`, `toggle_shuffle`, `toggle_like`, `add_to_playlist`, `create_playlist`, `remove`, `refresh_jam`, `start_jam`, `join_jam`, `leave_jam`.
+Configurable action names: `quit`, `search`, `toggle_view`, `previous_view`, `view_search`, `view_albums`, `view_queue`, `view_jam`, `toggle_search_section`, `move_down`, `move_up`, `select`, `play_selected`, `back`, `play_pause`, `next_track`, `previous_track`, `seek_backward`, `seek_forward`, `volume_up`, `volume_down`, `toggle_shuffle`, `toggle_focus`, `toggle_retro_art`, `toggle_like`, `add_to_playlist`, `create_playlist`, `remove`, `refresh_jam`, `start_jam`, `join_jam`, `leave_jam`.
 
 Invalid action names, unrecognized keys, empty binding lists, or duplicate key assignments fail startup with an explicit error.
+
+### Cover art style
+
+Focus mode uses native Kitty graphics when supported and falls back to Unicode quadrant-block art otherwise. To always start in retro pixelized quadrant-block mode, set `art_style = "retro"` (default `"auto"`) in `~/.config/violin/config.toml`.
 
 ## Contributing
 

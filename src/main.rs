@@ -7,12 +7,15 @@ use std::{
 };
 
 use crossterm::event::{self, Event};
+use ratatui::layout::Rect;
 use tokio::sync::mpsc;
 
 use violin::{
     app::{AppEvent, AppState, Command},
+    art::ArtProtocol,
     auth::{AuthManager, TokenStore},
-    config::{AppPaths, CLIENT_ID_ENV_VAR, Config},
+    config::{AppPaths, ArtStyle, CLIENT_ID_ENV_VAR, Config},
+    domain::TrackId,
     keymap::Keymap,
     player,
     spotify::SpotifyClient,
@@ -146,6 +149,7 @@ async fn run_app() -> Result<(), Box<dyn Error>> {
         &player_cmd_tx,
         &mut event_rx,
         &config.keymap,
+        config.art_style,
     );
 
     drop(spotify_cmd_tx);
@@ -162,10 +166,14 @@ fn run_tui(
     player_cmd_tx: &mpsc::Sender<Command>,
     event_rx: &mut mpsc::Receiver<AppEvent>,
     keymap: &Keymap,
+    art_style: ArtStyle,
 ) -> io::Result<()> {
     let mut terminal = TerminalGuard::init()?;
     let mut state = AppState::new();
+    state.retro_art = art_style == ArtStyle::Retro;
     let mut last_tick = Instant::now();
+    let detected_protocol = violin::art::detect_art_protocol();
+    let mut kitty_overlay: Option<(TrackId, Rect)> = None;
 
     while !state.should_quit {
         while let Ok(worker_event) = event_rx.try_recv() {
@@ -173,7 +181,38 @@ fn run_tui(
             forward_commands(spotify_cmd_tx, player_cmd_tx, commands);
         }
 
-        terminal.draw(|frame| ui::render(frame, &state))?;
+        let effective_protocol = if state.retro_art {
+            ArtProtocol::HalfBlock
+        } else {
+            detected_protocol
+        };
+        let mut art_rect = None;
+        terminal.draw(|frame| {
+            art_rect = ui::render_with_protocol(frame, &state, effective_protocol);
+        })?;
+
+        if effective_protocol == ArtProtocol::Kitty {
+            if state.focus_mode
+                && let Some(art) = &state.cover_art
+                && let Some(rect) = art_rect
+            {
+                let next_overlay = (art.track_id.clone(), rect);
+                if kitty_overlay.as_ref() != Some(&next_overlay) {
+                    if kitty_overlay.is_some() {
+                        terminal.clear_kitty_image()?;
+                    }
+                    terminal
+                        .write_kitty_image(&violin::art::kitty_transmit_and_place(art, rect))?;
+                    kitty_overlay = Some(next_overlay);
+                }
+            } else if kitty_overlay.is_some() {
+                terminal.clear_kitty_image()?;
+                kitty_overlay = None;
+            }
+        } else if kitty_overlay.is_some() {
+            terminal.clear_kitty_image()?;
+            kitty_overlay = None;
+        }
 
         let poll_timeout = TICK_INTERVAL
             .saturating_sub(last_tick.elapsed())
@@ -216,7 +255,8 @@ fn forward_commands(
             | Command::FetchJamSession
             | Command::CreateJamSession
             | Command::JoinJamSession(_)
-            | Command::LeaveJamSession { .. } => {
+            | Command::LeaveJamSession { .. }
+            | Command::FetchCoverArt { .. } => {
                 let _ = spotify_cmd_tx.try_send(cmd);
             }
             Command::PlayTrack(_)

@@ -12,7 +12,8 @@ use ratatui::{
 };
 
 use crate::{
-    app::{AppState, InputMode, PendingDelete, QueueContext, SearchSection, View},
+    app::{AppState, InputMode, NowPlaying, PendingDelete, QueueContext, SearchSection, View},
+    art::{self, ArtProtocol},
     domain::{Album, LibraryItem, PlaybackStatus, Track},
 };
 
@@ -34,6 +35,19 @@ fn rounded_block<'a>(title: impl Into<Line<'a>>) -> Block<'a> {
 
 /// Renders the entire `AppState` into the given `ratatui::Frame`.
 pub fn render(frame: &mut Frame, state: &AppState) {
+    let _ = render_with_protocol(frame, state, ArtProtocol::HalfBlock);
+}
+
+/// Renders `AppState` using `protocol` for cover art, returning the cover-art `Rect` in Focus mode.
+pub fn render_with_protocol(
+    frame: &mut Frame,
+    state: &AppState,
+    protocol: ArtProtocol,
+) -> Option<Rect> {
+    if state.focus_mode {
+        return render_focus_view(frame, state, protocol);
+    }
+
     let has_footer = state.status_message.is_some() || state.notice_message.is_some();
     if has_footer {
         let [header_area, body_area, now_playing_area, footer_area] = Layout::vertical([
@@ -77,6 +91,83 @@ pub fn render(frame: &mut Frame, state: &AppState) {
         InputMode::AddToPlaylistPicker => render_playlist_picker_modal(frame, state),
         InputMode::ConfirmDelete => render_confirm_delete_modal(frame, state),
         InputMode::Normal | InputMode::SearchInput => {}
+    }
+
+    None
+}
+
+fn render_focus_view(frame: &mut Frame, state: &AppState, protocol: ArtProtocol) -> Option<Rect> {
+    let area = frame.area();
+    if area.width == 0 || area.height == 0 {
+        return None;
+    }
+
+    let title_x = if area.width > 1 { area.x + 1 } else { area.x };
+    let title_w = area.width.saturating_sub(title_x - area.x).min(6);
+    frame.render_widget(
+        Paragraph::new(Line::styled(
+            "violin",
+            Style::default()
+                .fg(Color::LightCyan)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Rect::new(title_x, area.y, title_w, 1),
+    );
+
+    let art_rows = area
+        .height
+        .saturating_sub(5)
+        .min(area.width.saturating_sub(4) / 2)
+        .min(24);
+    let art_cols = art_rows * 2;
+    let stack_h = art_rows + 2;
+    let available_h = area.height.saturating_sub(1);
+    let top_y = area.y + 1 + available_h.saturating_sub(stack_h) / 2;
+    let art_x = area.x + area.width.saturating_sub(art_cols) / 2;
+    let art_rect = Rect::new(art_x, top_y, art_cols, art_rows);
+
+    if art_rect.width > 0
+        && art_rect.height > 0
+        && let Some(art) = &state.cover_art
+    {
+        match protocol {
+            ArtProtocol::HalfBlock => {
+                let lines = art::render_retro_art_lines(art, art_rect.width, art_rect.height);
+                frame.render_widget(Paragraph::new(lines), art_rect);
+            }
+            ArtProtocol::Kitty => {}
+        }
+    }
+
+    let bar_w = art_cols.max(20).min(area.width.saturating_sub(4));
+    let bar_x = area.x + area.width.saturating_sub(bar_w) / 2;
+    let bar_y = top_y + art_rows + 1;
+    if bar_w > 0 && bar_y < area.y + area.height {
+        let ratio = playback_ratio(state.now_playing.as_ref());
+        let (filled_fg, empty_bg) = if state
+            .now_playing
+            .as_ref()
+            .is_some_and(|np| np.status == PlaybackStatus::Playing)
+        {
+            (Color::Cyan, Color::DarkGray)
+        } else {
+            (Color::Rgb(110, 110, 110), Color::Rgb(45, 45, 45))
+        };
+        frame.render_widget(
+            Paragraph::new(build_progress_bar_line_styled(
+                ratio,
+                usize::from(bar_w),
+                filled_fg,
+                empty_bg,
+            )),
+            Rect::new(bar_x, bar_y, bar_w, 1),
+        );
+    }
+
+    if art_rect.width > 0 && art_rect.height > 0 {
+        Some(art_rect)
+    } else {
+        None
     }
 }
 
@@ -623,10 +714,10 @@ fn render_now_playing(frame: &mut Frame, area: Rect, state: &AppState) {
     let (track_line, time_label, ratio) = match &state.now_playing {
         Some(np) => {
             let symbol = match np.status {
-                PlaybackStatus::Playing => "⏸",
-                PlaybackStatus::Paused | PlaybackStatus::Stopped => "▶",
+                PlaybackStatus::Playing => "⏸ ",
+                PlaybackStatus::Paused | PlaybackStatus::Stopped => "▶ ",
             };
-            let mut spans = vec![Span::raw(format!("{symbol} "))];
+            let mut spans = vec![Span::raw(symbol)];
             if state.liked_track_ids.contains(np.track.id.as_str()) {
                 spans.push(Span::styled("♥ ", Style::default().fg(Color::Red)));
             }
@@ -639,11 +730,7 @@ fn render_now_playing(frame: &mut Frame, area: Rect, state: &AppState) {
             let dur = np.track.duration;
             let pos = np.position.min(dur);
             let label = format!(" {} / {}", format_duration(pos), format_duration(dur));
-            let ratio = if dur.as_millis() > 0 {
-                (pos.as_secs_f64() / dur.as_secs_f64()).clamp(0.0, 1.0)
-            } else {
-                0.0
-            };
+            let ratio = playback_ratio(Some(np));
             (Line::from(spans), label, ratio)
         }
         None => (
@@ -667,31 +754,59 @@ fn render_now_playing(frame: &mut Frame, area: Rect, state: &AppState) {
 
     let bar_width = bar_area.width as usize;
     if bar_width > 0 {
-        const SUBCELL_BLOCKS: [&str; 8] = ["", "▏", "▎", "▍", "▌", "▋", "▊", "▉"];
-        let total_eighths = ((ratio * (bar_width * 8) as f64).round() as usize).min(bar_width * 8);
-        let full_cells = total_eighths / 8;
-        let rem = total_eighths % 8;
-        let empty_cells = bar_width.saturating_sub(full_cells + usize::from(rem > 0));
-        let mut spans = vec![Span::styled(
-            "█".repeat(full_cells),
-            Style::default().fg(Color::Cyan),
-        )];
-        if rem > 0 {
-            spans.push(Span::styled(
-                SUBCELL_BLOCKS[rem],
-                Style::default().fg(Color::Cyan).bg(Color::DarkGray),
-            ));
-        }
-        spans.push(Span::styled(
-            " ".repeat(empty_cells),
-            Style::default().bg(Color::DarkGray),
-        ));
-        frame.render_widget(Paragraph::new(Line::from(spans)), bar_area);
+        frame.render_widget(
+            Paragraph::new(build_progress_bar_line(ratio, bar_width)),
+            bar_area,
+        );
     }
     frame.render_widget(
         Paragraph::new(time_label).style(Style::default().fg(Color::DarkGray)),
         time_area,
     );
+}
+
+fn playback_ratio(now_playing: Option<&NowPlaying>) -> f64 {
+    let Some(np) = now_playing else {
+        return 0.0;
+    };
+    let dur = np.track.duration;
+    if dur.as_millis() == 0 {
+        return 0.0;
+    }
+    let pos = np.position.min(dur);
+    (pos.as_secs_f64() / dur.as_secs_f64()).clamp(0.0, 1.0)
+}
+
+fn build_progress_bar_line(ratio: f64, bar_width: usize) -> Line<'static> {
+    build_progress_bar_line_styled(ratio, bar_width, Color::Cyan, Color::DarkGray)
+}
+
+fn build_progress_bar_line_styled(
+    ratio: f64,
+    bar_width: usize,
+    filled_fg: Color,
+    empty_bg: Color,
+) -> Line<'static> {
+    const SUBCELL_BLOCKS: [&str; 8] = ["", "▏", "▎", "▍", "▌", "▋", "▊", "▉"];
+    let total_eighths = ((ratio * (bar_width * 8) as f64).round() as usize).min(bar_width * 8);
+    let full_cells = total_eighths / 8;
+    let rem = total_eighths % 8;
+    let empty_cells = bar_width.saturating_sub(full_cells + usize::from(rem > 0));
+    let mut spans = vec![Span::styled(
+        "█".repeat(full_cells),
+        Style::default().fg(filled_fg),
+    )];
+    if rem > 0 {
+        spans.push(Span::styled(
+            SUBCELL_BLOCKS[rem],
+            Style::default().fg(filled_fg).bg(empty_bg),
+        ));
+    }
+    spans.push(Span::styled(
+        " ".repeat(empty_cells),
+        Style::default().bg(empty_bg),
+    ));
+    Line::from(spans)
 }
 
 fn render_footer(frame: &mut Frame, area: Rect, state: &AppState) {
@@ -856,6 +971,7 @@ mod tests {
             artists: vec!["Beethoven".to_string()],
             album_name: "Sonatas".to_string(),
             duration: Duration::from_secs(secs),
+            cover_url: None,
         }
     }
 
@@ -1420,5 +1536,128 @@ mod tests {
             assert_eq!(full_buf[(x, bar_y)].symbol(), "█");
             assert_eq!(full_buf[(x, bar_y)].fg, Color::Cyan);
         }
+    }
+
+    fn make_solid_cover_art(r: u8, g: u8, b: u8) -> crate::domain::CoverArt {
+        let mut rgb = Vec::with_capacity(4 * 4 * 3);
+        for _ in 0..16 {
+            rgb.extend_from_slice(&[r, g, b]);
+        }
+        crate::domain::CoverArt {
+            track_id: TrackId::new("trk_art").unwrap(),
+            width: 4,
+            height: 4,
+            rgb: std::sync::Arc::from(rgb),
+            encoded_png: std::sync::Arc::from(vec![1, 2, 3]),
+        }
+    }
+
+    #[test]
+    fn focus_mode_renders_only_violin_art_and_progress_bar_with_dim_when_paused() {
+        let mut state = AppState::new();
+        state.focus_mode = true;
+        state.now_playing = Some(NowPlaying {
+            track: make_track("t1", "Kreutzer Sonata", 100),
+            status: PlaybackStatus::Playing,
+            position: Duration::from_secs(50),
+        });
+        state.cover_art = Some(make_solid_cover_art(120, 45, 200));
+
+        let buf = render_buffer(&state, 80, 24);
+        let screen = buffer_to_string(&buf);
+
+        assert!(screen.contains("violin"));
+        assert_eq!(buf[(1, 0)].symbol(), "v");
+        assert_eq!(buf[(1, 0)].fg, Color::LightCyan);
+        assert!(buf[(1, 0)].modifier.contains(Modifier::BOLD));
+
+        assert!(screen.contains('█'));
+        let has_art_color = (0..buf.area.height).any(|y| {
+            (0..buf.area.width)
+                .any(|x| buf[(x, y)].symbol() == "█" && buf[(x, y)].fg == Color::Rgb(120, 45, 200))
+        });
+        assert!(has_art_color);
+
+        let has_cyan_bar = (0..buf.area.height).any(|y| {
+            (0..buf.area.width)
+                .any(|x| buf[(x, y)].symbol() == "█" && buf[(x, y)].fg == Color::Cyan)
+        });
+        assert!(has_cyan_bar);
+
+        for forbidden in [
+            "⏸",
+            "▶",
+            "■",
+            "||",
+            "Kreutzer Sonata",
+            "Beethoven",
+            "00:50",
+            "01:40",
+            "Search",
+            "Library",
+            "Queue",
+            "Jam",
+            "Now Playing",
+            "╭",
+            "╰",
+            "Vol",
+        ] {
+            assert!(
+                !screen.contains(forbidden),
+                "unexpected '{forbidden}' in focus mode:\n{screen}"
+            );
+        }
+
+        state.now_playing.as_mut().unwrap().status = PlaybackStatus::Paused;
+        let paused_buf = render_buffer(&state, 80, 24);
+        let has_dim_bar = (0..paused_buf.area.height).any(|y| {
+            (0..paused_buf.area.width).any(|x| {
+                paused_buf[(x, y)].symbol() == "█"
+                    && paused_buf[(x, y)].fg == Color::Rgb(110, 110, 110)
+            })
+        });
+        assert!(has_dim_bar);
+        let has_cyan_when_paused = (0..paused_buf.area.height).any(|y| {
+            (0..paused_buf.area.width)
+                .any(|x| paused_buf[(x, y)].symbol() == "█" && paused_buf[(x, y)].fg == Color::Cyan)
+        });
+        assert!(!has_cyan_when_paused);
+    }
+
+    #[test]
+    fn focus_mode_with_kitty_protocol_leaves_art_rect_blank_and_returns_rect() {
+        let mut state = AppState::new();
+        state.focus_mode = true;
+        state.now_playing = Some(NowPlaying {
+            track: make_track("t1", "Chaconne", 120),
+            status: PlaybackStatus::Paused,
+            position: Duration::from_secs(30),
+        });
+        state.cover_art = Some(make_solid_cover_art(10, 200, 30));
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut returned_rect = None;
+        terminal
+            .draw(|frame| {
+                returned_rect = render_with_protocol(frame, &state, ArtProtocol::Kitty);
+            })
+            .unwrap();
+
+        let rect = returned_rect.expect("expected Some(art_rect) in focus mode");
+        assert!(rect.width > 0 && rect.height > 0);
+
+        let buf = terminal.backend().buffer();
+        for y in rect.y..rect.y + rect.height {
+            for x in rect.x..rect.x + rect.width {
+                assert_ne!(buf[(x, y)].symbol(), "█");
+                assert_eq!(buf[(x, y)].symbol(), " ");
+            }
+        }
+        let has_dim_bar = (0..buf.area.height).any(|y| {
+            (0..buf.area.width)
+                .any(|x| buf[(x, y)].symbol() == "█" && buf[(x, y)].fg == Color::Rgb(110, 110, 110))
+        });
+        assert!(has_dim_bar);
     }
 }

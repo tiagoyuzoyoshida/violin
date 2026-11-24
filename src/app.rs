@@ -4,7 +4,8 @@ use std::time::Duration;
 use rand::seq::SliceRandom;
 
 use crate::domain::{
-    Album, JamSession, LibraryItem, PlaybackQueue, PlaybackStatus, SearchResults, Track,
+    Album, CoverArt, JamSession, LibraryItem, PlaybackQueue, PlaybackStatus, SearchResults, Track,
+    TrackId,
 };
 use crate::spotify::{LIKED_SONGS_ID, PLAYLIST_ID_PREFIX};
 
@@ -105,6 +106,8 @@ pub enum Action {
     SwitchView(View),
     ToggleView,
     PreviousView,
+    ToggleFocus,
+    ToggleRetroArt,
     ToggleSearchSection,
     EnterSearchInput,
     ExitSearchInput,
@@ -193,6 +196,10 @@ pub enum AppEvent {
         copied_to_clipboard: bool,
     },
     JamLeft,
+    CoverArtLoaded(CoverArt),
+    CoverArtFailed {
+        track_id: TrackId,
+    },
     PlaybackFailed(String),
     Error(String),
 }
@@ -242,6 +249,10 @@ pub enum Command {
         session_id: String,
         is_owner: bool,
     },
+    FetchCoverArt {
+        track_id: TrackId,
+        cover_url: Option<String>,
+    },
 }
 
 /// Pure application state machine.
@@ -277,6 +288,10 @@ pub struct AppState {
     pub selected_playlist_picker: usize,
     pub jam_join_input: String,
     pub pending_delete: Option<PendingDelete>,
+    pub focus_mode: bool,
+    pub retro_art: bool,
+    pub cover_art: Option<CoverArt>,
+    cover_art_requested_track_id: Option<TrackId>,
 }
 
 impl Default for AppState {
@@ -319,6 +334,10 @@ impl AppState {
             selected_playlist_picker: 0,
             jam_join_input: String::new(),
             pending_delete: None,
+            focus_mode: false,
+            retro_art: false,
+            cover_art: None,
+            cover_art_requested_track_id: None,
         }
     }
 
@@ -331,6 +350,14 @@ impl AppState {
     pub fn handle_action(&mut self, action: Action) -> Vec<Command> {
         match action {
             Action::Quit => self.handle_quit(),
+            Action::ToggleFocus => {
+                self.focus_mode = !self.focus_mode;
+                self.maybe_fetch_cover_art()
+            }
+            Action::ToggleRetroArt => {
+                self.retro_art = !self.retro_art;
+                Vec::new()
+            }
             Action::SwitchView(view) => {
                 self.active_view = view;
                 self.input_mode = InputMode::Normal;
@@ -404,6 +431,10 @@ impl AppState {
             Action::Select => self.handle_select(false),
             Action::PlaySelected => self.handle_select(true),
             Action::Back => {
+                if self.focus_mode {
+                    self.focus_mode = false;
+                    return Vec::new();
+                }
                 if self.active_album_detail().is_some() {
                     self.album_detail = None;
                 } else if self.active_view == View::MyAlbums
@@ -615,13 +646,14 @@ impl AppState {
                         self.radio_fetch_in_flight = false;
                     }
                 }
+                self.clear_cover_art_if_different(&track.id);
                 self.now_playing = Some(NowPlaying {
                     track,
                     status,
                     position: clamped,
                 });
                 self.status_message = None;
-                Vec::new()
+                self.maybe_fetch_cover_art()
             }
             AppEvent::TrackEnded => self.advance_after_track_end(),
             AppEvent::QueueUpdated(mut tracks) => {
@@ -755,6 +787,25 @@ impl AppState {
             AppEvent::JamLeft => {
                 self.jam_session = None;
                 self.notice_message = Some("Left Jam session".to_string());
+                Vec::new()
+            }
+            AppEvent::CoverArtLoaded(art) => {
+                if self.cover_art_requested_track_id.as_ref() == Some(&art.track_id) {
+                    self.cover_art_requested_track_id = None;
+                }
+                if self
+                    .now_playing
+                    .as_ref()
+                    .is_some_and(|np| np.track.id == art.track_id)
+                {
+                    self.cover_art = Some(art);
+                }
+                Vec::new()
+            }
+            AppEvent::CoverArtFailed { track_id } => {
+                if self.cover_art_requested_track_id.as_ref() == Some(&track_id) {
+                    self.cover_art_requested_track_id = None;
+                }
                 Vec::new()
             }
             AppEvent::PlaybackFailed(message) => {
@@ -1389,13 +1440,56 @@ impl AppState {
         Vec::new()
     }
 
+    fn clear_cover_art_if_different(&mut self, track_id: &TrackId) {
+        if self
+            .cover_art
+            .as_ref()
+            .is_some_and(|art| &art.track_id != track_id)
+        {
+            self.cover_art = None;
+        }
+        if self
+            .cover_art_requested_track_id
+            .as_ref()
+            .is_some_and(|id| id != track_id)
+        {
+            self.cover_art_requested_track_id = None;
+        }
+    }
+
+    fn maybe_fetch_cover_art(&mut self) -> Vec<Command> {
+        if !self.focus_mode {
+            return Vec::new();
+        }
+        let Some(np) = &self.now_playing else {
+            return Vec::new();
+        };
+        let track_id = &np.track.id;
+        if self
+            .cover_art
+            .as_ref()
+            .is_some_and(|art| &art.track_id == track_id)
+            || self.cover_art_requested_track_id.as_ref() == Some(track_id)
+        {
+            return Vec::new();
+        }
+        self.cover_art_requested_track_id = Some(track_id.clone());
+        vec![Command::FetchCoverArt {
+            track_id: track_id.clone(),
+            cover_url: np.track.cover_url.clone(),
+        }]
+    }
+
     fn start_playing_track(&mut self, track: Track) -> Vec<Command> {
+        self.clear_cover_art_if_different(&track.id);
         self.now_playing = Some(NowPlaying {
             track: track.clone(),
             status: PlaybackStatus::Playing,
             position: Duration::ZERO,
         });
-        vec![Command::PlayTrack(track)]
+        let mut cmds = vec![Command::PlayTrack(track)];
+        cmds.extend(self.maybe_fetch_cover_art());
+        cmds
     }
 }
 
@@ -1446,6 +1540,7 @@ mod tests {
             artists: vec!["Artist".to_string()],
             album_name: "Album".to_string(),
             duration: Duration::from_secs(secs),
+            cover_url: None,
         }
     }
 
@@ -3365,5 +3460,105 @@ mod tests {
             state.handle_action(Action::Select),
             vec![Command::PlayTrack(tracks[2].clone())]
         );
+    }
+
+    fn make_cover_art(id: &str) -> CoverArt {
+        CoverArt {
+            track_id: TrackId::new(id).unwrap(),
+            width: 2,
+            height: 2,
+            rgb: std::sync::Arc::from(vec![0u8; 12]),
+            encoded_png: std::sync::Arc::from(b"\x89PNG".to_vec()),
+        }
+    }
+
+    #[test]
+    fn toggle_focus_and_back_preserve_underlying_view_and_album_detail() {
+        let mut state = AppState::new();
+        state.handle_event(AppEvent::AlbumTracksLoaded {
+            album: make_album("a1", "Blue"),
+            tracks: numbered_tracks(2),
+            auto_play: false,
+        });
+        assert!(state.album_detail.is_some());
+
+        assert!(state.handle_action(Action::ToggleFocus).is_empty());
+        assert!(state.focus_mode);
+
+        // Esc exits focus_mode without closing album_detail.
+        assert!(state.handle_action(Action::Back).is_empty());
+        assert!(!state.focus_mode);
+        assert!(state.album_detail.is_some());
+
+        // ToggleFocus toggles on and off.
+        assert!(state.handle_action(Action::ToggleFocus).is_empty());
+        assert!(state.focus_mode);
+        assert!(state.handle_action(Action::ToggleFocus).is_empty());
+        assert!(!state.focus_mode);
+    }
+
+    #[test]
+    fn cover_art_is_fetched_lazily_in_focus_mode_and_ignores_stale_responses() {
+        let mut t1 = make_track("t1", "One", 120);
+        t1.cover_url = Some("https://i.scdn.co/image/one".to_string());
+        let mut t2 = make_track("t2", "Two", 120);
+        t2.cover_url = Some("https://i.scdn.co/image/two".to_string());
+
+        let mut state = AppState::new();
+        // Outside focus mode, playing a track does not emit FetchCoverArt.
+        let cmds = state.handle_event(AppEvent::TrackSynced {
+            track: t1.clone(),
+            position: Duration::ZERO,
+            status: PlaybackStatus::Playing,
+        });
+        assert!(cmds.is_empty());
+
+        // Entering focus mode emits FetchCoverArt for the playing track.
+        let cmds = state.handle_action(Action::ToggleFocus);
+        assert_eq!(
+            cmds,
+            vec![Command::FetchCoverArt {
+                track_id: t1.id.clone(),
+                cover_url: t1.cover_url.clone(),
+            }]
+        );
+        // Re-toggling off and on while request is in flight does not duplicate.
+        state.handle_action(Action::ToggleFocus);
+        assert!(state.handle_action(Action::ToggleFocus).is_empty());
+
+        // Track changes while in focus mode: clears stale art/request and fetches new track art.
+        let cmds = state.handle_event(AppEvent::TrackSynced {
+            track: t2.clone(),
+            position: Duration::ZERO,
+            status: PlaybackStatus::Playing,
+        });
+        assert_eq!(
+            cmds,
+            vec![Command::FetchCoverArt {
+                track_id: t2.id.clone(),
+                cover_url: t2.cover_url.clone(),
+            }]
+        );
+
+        // Stale response for t1 is ignored.
+        state.handle_event(AppEvent::CoverArtLoaded(make_cover_art("t1")));
+        assert!(state.cover_art.is_none());
+
+        // Matching response for t2 is stored.
+        let art2 = make_cover_art("t2");
+        state.handle_event(AppEvent::CoverArtLoaded(art2.clone()));
+        assert_eq!(state.cover_art, Some(art2));
+    }
+
+    #[test]
+    fn toggle_retro_art_flips_flag_without_emitting_commands() {
+        let mut state = AppState::new();
+        assert!(!state.retro_art);
+
+        assert!(state.handle_action(Action::ToggleRetroArt).is_empty());
+        assert!(state.retro_art);
+
+        assert!(state.handle_action(Action::ToggleRetroArt).is_empty());
+        assert!(!state.retro_art);
     }
 }

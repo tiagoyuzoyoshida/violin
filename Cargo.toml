@@ -1,6 +1,6 @@
 [package]
 name = "violin"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2024"
 license = "MIT"
 description = "An opinionated, lightweight Spotify TUI for Linux"
@@ -15,6 +15,7 @@ directories = "6"
 flate2 = "1"
 futures-util = "0.3"
 http = "1"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 librespot-core = { version = "0.8", default-features = false, features = ["rustls-tls-webpki-roots"] }
 librespot-protocol = "0.8"
 protobuf = "3"

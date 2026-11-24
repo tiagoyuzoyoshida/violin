@@ -45,6 +45,8 @@ const DEFAULT_BINDINGS: &[(&str, Action, &[&str])] = &[
     ("view_albums", Action::SwitchView(View::MyAlbums), &["2"]),
     ("view_queue", Action::SwitchView(View::Queue), &["3"]),
     ("view_jam", Action::SwitchView(View::Jam), &["4"]),
+    ("toggle_focus", Action::ToggleFocus, &["m"]),
+    ("toggle_retro_art", Action::ToggleRetroArt, &["t"]),
     ("toggle_search_section", Action::ToggleSearchSection, &["s"]),
     ("move_down", Action::MoveDown, &["j"]),
     ("move_up", Action::MoveUp, &["k"]),
@@ -771,6 +773,48 @@ mod tests {
         );
         assert_eq!(
             map_key(InputMode::ConfirmDelete, press(KeyCode::Backspace)),
+            None
+        );
+    }
+
+    #[test]
+    fn toggle_focus_maps_m_by_default_and_can_be_overridden() {
+        let default_keymap = Keymap::default();
+        assert_eq!(
+            default_keymap.map_key(InputMode::Normal, press(KeyCode::Char('m'))),
+            Some(Action::ToggleFocus)
+        );
+
+        let mut overrides = HashMap::new();
+        overrides.insert("toggle_focus".to_string(), vec!["v".to_string()]);
+        let custom = Keymap::from_overrides(&overrides).unwrap();
+        assert_eq!(
+            custom.map_key(InputMode::Normal, press(KeyCode::Char('v'))),
+            Some(Action::ToggleFocus)
+        );
+        assert_eq!(
+            custom.map_key(InputMode::Normal, press(KeyCode::Char('m'))),
+            None
+        );
+    }
+
+    #[test]
+    fn toggle_retro_art_maps_t_by_default_and_can_be_overridden() {
+        let default_keymap = Keymap::default();
+        assert_eq!(
+            default_keymap.map_key(InputMode::Normal, press(KeyCode::Char('t'))),
+            Some(Action::ToggleRetroArt)
+        );
+
+        let mut overrides = HashMap::new();
+        overrides.insert("toggle_retro_art".to_string(), vec!["g".to_string()]);
+        let custom = Keymap::from_overrides(&overrides).unwrap();
+        assert_eq!(
+            custom.map_key(InputMode::Normal, press(KeyCode::Char('g'))),
+            Some(Action::ToggleRetroArt)
+        );
+        assert_eq!(
+            custom.map_key(InputMode::Normal, press(KeyCode::Char('t'))),
             None
         );
     }

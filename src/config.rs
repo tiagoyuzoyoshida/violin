@@ -31,6 +31,18 @@ pub enum ConfigError {
     },
     #[error("invalid keybindings in {}: {source}", path.display())]
     InvalidKeybindings { path: PathBuf, source: KeymapError },
+    #[error(
+        "invalid art_style '{value}' in {} (expected \"auto\" or \"retro\")",
+        path.display()
+    )]
+    InvalidArtStyle { path: PathBuf, value: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ArtStyle {
+    #[default]
+    Auto,
+    Retro,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,6 +78,7 @@ pub struct Config {
     pub client_id: String,
     pub paths: AppPaths,
     pub keymap: Keymap,
+    pub art_style: ArtStyle,
 }
 
 impl Config {
@@ -92,12 +105,14 @@ impl Config {
                 source,
             }
         })?;
+        let art_style = resolve_art_style(parsed.art_style.as_deref(), &paths.config_file)?;
         let env_override = std::env::var(CLIENT_ID_ENV_VAR).ok();
         let client_id = resolve_client_id(env_override, parsed.client_id);
         Ok(Self {
             client_id,
             paths,
             keymap,
+            art_style,
         })
     }
 }
@@ -112,6 +127,7 @@ enum StringOrVec {
 #[derive(Debug, Deserialize, Default)]
 struct RawConfig {
     client_id: Option<String>,
+    art_style: Option<String>,
     #[serde(default)]
     keybindings: HashMap<String, StringOrVec>,
 }
@@ -119,6 +135,7 @@ struct RawConfig {
 #[derive(Debug, Default)]
 struct ParsedConfig {
     client_id: Option<String>,
+    art_style: Option<String>,
     keybindings: HashMap<String, Vec<String>>,
 }
 
@@ -137,8 +154,23 @@ fn parse_raw_config(raw: &str) -> Result<ParsedConfig, toml::de::Error> {
         .collect();
     Ok(ParsedConfig {
         client_id: parsed.client_id,
+        art_style: parsed.art_style,
         keybindings,
     })
+}
+
+fn resolve_art_style(value: Option<&str>, path: &std::path::Path) -> Result<ArtStyle, ConfigError> {
+    let Some(raw) = value else {
+        return Ok(ArtStyle::Auto);
+    };
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "auto" => Ok(ArtStyle::Auto),
+        "retro" => Ok(ArtStyle::Retro),
+        _ => Err(ConfigError::InvalidArtStyle {
+            path: path.to_path_buf(),
+            value: raw.to_string(),
+        }),
+    }
 }
 
 /// Parses a `config.toml` payload and extracts `client_id` if present.
@@ -250,5 +282,35 @@ mod tests {
             resolve_client_id(None, None),
             crate::auth::DEFAULT_SPOTIFY_CLIENT_ID
         );
+    }
+
+    #[test]
+    fn art_style_parses_default_auto_retro_and_rejects_invalid() {
+        let path = PathBuf::from("/tmp/config.toml");
+
+        let default_cfg = parse_raw_config("").unwrap();
+        assert_eq!(
+            resolve_art_style(default_cfg.art_style.as_deref(), &path).unwrap(),
+            ArtStyle::Auto
+        );
+
+        let retro_cfg = parse_raw_config("art_style = \" Retro \"\n").unwrap();
+        assert_eq!(
+            resolve_art_style(retro_cfg.art_style.as_deref(), &path).unwrap(),
+            ArtStyle::Retro
+        );
+
+        let auto_cfg = parse_raw_config("art_style = \"AUTO\"\n").unwrap();
+        assert_eq!(
+            resolve_art_style(auto_cfg.art_style.as_deref(), &path).unwrap(),
+            ArtStyle::Auto
+        );
+
+        let invalid_cfg = parse_raw_config("art_style = \"ascii\"\n").unwrap();
+        let err = resolve_art_style(invalid_cfg.art_style.as_deref(), &path).unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::InvalidArtStyle { value, .. } if value == "ascii"
+        ));
     }
 }

@@ -1,5 +1,6 @@
 use std::{
-    io, panic,
+    io::{self, Write as _},
+    panic,
     sync::{
         Once,
         atomic::{AtomicBool, Ordering},
@@ -19,6 +20,7 @@ use ratatui::{Frame, Terminal, backend::CrosstermBackend};
 
 static PANIC_HOOK_ONCE: Once = Once::new();
 static KEYBOARD_FLAGS_PUSHED: AtomicBool = AtomicBool::new(false);
+static KITTY_IMAGE_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// RAII guard that enables raw mode and the alternate screen on creation,
 /// and restores the terminal on drop or panic.
@@ -68,6 +70,24 @@ impl TerminalGuard {
         self.terminal.draw(render_fn)?;
         Ok(())
     }
+
+    /// Writes a Kitty Graphics Protocol escape sequence to stdout and marks the overlay active.
+    pub fn write_kitty_image(&mut self, seq: &str) -> io::Result<()> {
+        let mut stdout = io::stdout();
+        stdout.write_all(seq.as_bytes())?;
+        stdout.flush()?;
+        KITTY_IMAGE_ACTIVE.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
+    /// Clears the active Kitty Graphics Protocol image from stdout.
+    pub fn clear_kitty_image(&mut self) -> io::Result<()> {
+        let mut stdout = io::stdout();
+        stdout.write_all(crate::art::kitty_clear_image().as_bytes())?;
+        stdout.flush()?;
+        KITTY_IMAGE_ACTIVE.store(false, Ordering::SeqCst);
+        Ok(())
+    }
 }
 
 impl Drop for TerminalGuard {
@@ -87,6 +107,11 @@ fn install_panic_hook() {
 }
 
 fn restore_terminal() {
+    if KITTY_IMAGE_ACTIVE.swap(false, Ordering::SeqCst) {
+        let mut stdout = io::stdout();
+        let _ = stdout.write_all(crate::art::kitty_clear_image().as_bytes());
+        let _ = stdout.flush();
+    }
     if KEYBOARD_FLAGS_PUSHED.swap(false, Ordering::SeqCst) {
         let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
     }
