@@ -49,13 +49,20 @@ async fn main() -> ExitCode {
             }
             ExitCode::SUCCESS
         }
+        Some("update") => {
+            if let Err(err) = run_update_cmd().await {
+                eprintln!("violin: {err}");
+                return ExitCode::FAILURE;
+            }
+            ExitCode::SUCCESS
+        }
         Some("--version") | Some("-V") => {
             println!("violin {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
         }
         Some("--help") | Some("-h") => {
             println!(
-                "violin {}\n\nTerminal Spotify client.\n\nUsage:\n  violin [COMMAND | OPTIONS]\n\nCommands:\n  login            Log in to Spotify via browser link\n  logout           Remove cached Spotify tokens\n\nOptions:\n  -h, --help       Print help\n  -V, --version    Print version\n\nEnvironment:\n  {CLIENT_ID_ENV_VAR}  Optional custom Spotify client ID (overrides config.toml)",
+                "violin {}\n\nTerminal Spotify client.\n\nUsage:\n  violin [COMMAND | OPTIONS]\n\nCommands:\n  login            Log in to Spotify via browser link\n  logout           Remove cached Spotify tokens\n  update           Update violin to the latest release\n\nOptions:\n  -h, --help       Print help\n  -V, --version    Print version\n\nEnvironment:\n  {CLIENT_ID_ENV_VAR}  Optional custom Spotify client ID (overrides config.toml)",
                 env!("CARGO_PKG_VERSION")
             );
             ExitCode::SUCCESS
@@ -86,6 +93,25 @@ fn run_logout() -> Result<(), Box<dyn Error>> {
         println!("Already logged out (no cached Spotify tokens found).");
     }
     player::clear_soloist_pairing(&paths.soloist_dir)?;
+    Ok(())
+}
+
+async fn run_update_cmd() -> Result<(), Box<dyn Error>> {
+    match violin::update::run_update().await? {
+        violin::update::UpdateOutcome::UpToDate { current, .. } => {
+            println!("violin {current} is already up to date.");
+        }
+        violin::update::UpdateOutcome::Updated {
+            from,
+            to,
+            binary_path,
+        } => {
+            println!(
+                "Updated violin v{from} -> v{to} ({})",
+                binary_path.display()
+            );
+        }
+    }
     Ok(())
 }
 

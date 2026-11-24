@@ -35,6 +35,12 @@ curl -fsSL https://raw.githubusercontent.com/tiagoyuzoyoshida/violin/main/instal
 
 Optional environment overrides: `VIOLIN_VERSION` (e.g. `v0.1.0`) and `VIOLIN_INSTALL_DIR`.
 
+Update an existing installation in place:
+
+```bash
+violin update
+```
+
 ## Build from source
 
 Requires Rust `1.93+` (2024 edition); no ALSA development headers or `pkg-config` needed.

@@ -7,4 +7,5 @@ pub mod player;
 pub mod spotify;
 pub mod terminal;
 pub mod ui;
+pub mod update;
 pub mod worker;
